@@ -64,10 +64,13 @@ class Button:
 
         center = self.rect.center
         if self.sublabel and small_font is not None:
+            # 两行字的间距按**按钮高度**算，不写死：角色卡的高度是会调的
+            # （见 config 的 CARD_HEIGHT），写死的话卡片一压缩两行字就叠在一起了
+            offset = round(self.rect.height * 0.20)
             text = font.render(self.label, True, text_color)
-            surface.blit(text, text.get_rect(center=(center[0], center[1] - 12)))
+            surface.blit(text, text.get_rect(center=(center[0], center[1] - offset)))
             sub = small_font.render(self.sublabel, True, text_color)
-            surface.blit(sub, sub.get_rect(center=(center[0], center[1] + 14)))
+            surface.blit(sub, sub.get_rect(center=(center[0], center[1] + offset)))
         else:
             text = font.render(self.label, True, text_color)
             surface.blit(text, text.get_rect(center=center))

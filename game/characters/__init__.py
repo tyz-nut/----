@@ -10,7 +10,16 @@ from .base import Character, CollisionOutcome
 from .fisher import Fisher
 from .laser import Laser
 from .normal import NormalBall
-from .skills import BatSwarmSkill, BoostSkill, HookSkill, LaserSkill, Skill
+from .samurai import Samurai
+from .skills import (
+    BatSwarmSkill,
+    BladeSkill,
+    BoostSkill,
+    HookSkill,
+    LaserSkill,
+    Skill,
+    ThrustSkill,
+)
 from .vampire import Vampire
 
 __all__ = [
@@ -21,8 +30,11 @@ __all__ = [
     "BatSwarmSkill",
     "HookSkill",
     "LaserSkill",
+    "BladeSkill",
+    "ThrustSkill",
     "NormalBall",
     "Vampire",
     "Fisher",
     "Laser",
+    "Samurai",
 ]

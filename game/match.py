@@ -102,6 +102,9 @@ class Match:
             ball.unsilence()
             ball.hook = None
             ball.lasers = None
+            ball.thrust = None
+            # 刀不在这里清——它是常驻被动，跟血量一样属于"球生来就有的东西"，
+            # 由 on_spawn 在造球的时候挂上。重开时球是新建的，刀自然是新的
         self.effects.clear()
 
     def _others(self, player: int) -> list[Ball]:
@@ -111,7 +114,11 @@ class Match:
         position = self.arena.random_spawn_point(
             character.radius, others, gap=BALL_SPAWN_MIN_GAP
         )
-        return Ball.spawn(player, character, position)
+        ball = Ball.spawn(player, character, position)
+        # 常驻被动在这里挂上（绕身刀）。放在造好之后而不是 Ball.spawn 里，
+        # 是因为它要读球的朝向——刀从哪个角度开始转，得等朝向定下来才知道
+        character.attach_passive(ball, self)
+        return ball
 
     # ---------------- 推进 ----------------
     def update(self, dt: float) -> None:
@@ -131,6 +138,7 @@ class Match:
         # 球这一刻在不在动。放在吸住/钩锁的提前返回之前，所以被吸住、被拖着的
         # 人也照样会被线打到——线是画在墙上的，跟谁在动没关系
         self.apply_lasers(dt)
+        self.apply_blades(dt)
         if self.finished:
             return
 
@@ -150,10 +158,17 @@ class Match:
             self.keep_inside(victim)
             return
 
+        # 穿刺也是"位置归别人管"的一种，在位移之前推它
+        self.update_thrusts(dt)
+        if self.finished:
+            self.keep_inside(victim)
+            return
+
         for ball in self.balls.values():
-            # 甩钩锁的人定在原地，被钩回来的人由折线拖着走——两种都不按各自的动量
-            # 位移。但计时器照走，否则技能冷却和生效时长会被钩锁冻住
-            if ball.frozen or ball is victim:
+            # 甩钩锁的人定在原地，被钩回来的人由折线拖着走，正在冲的那位由
+            # 穿刺的方向和速度决定位置——三种都不按各自的动量位移。
+            # 但计时器照走，否则技能冷却和生效时长会被冻住
+            if ball.frozen or ball is victim or ball.thrust is not None:
                 ball.tick(dt)
             else:
                 ball.update(dt)
@@ -382,6 +397,119 @@ class Match:
                 self.effects.drain_damage(target.player, target.position, dealt)
         self.judge()
 
+    # ---------------- 绕身刀 ----------------
+    def apply_blades(self, dt: float) -> None:
+        """结算绕身刀：转一步，蹭到的敌人扣一次血，**每转一圈最多蹭一次**。
+
+        和激光、光环同一批：都是"场上的东西每帧对球做什么"。放在吸住/钩锁的
+        提前返回之前，所以被吸住、被拖着的人也照样会被刀刮到——刀是长在武士
+        身上的，跟谁在动没关系。
+
+        判定用刀那一截线段到敌人圆心的距离，而不是"两个球挨上了"：刀是伸出去
+        的，武士本人离敌人还有一段距离就该刮得到。
+
+        自己的刀不伤自己，和激光同理。
+        """
+        for owner in self.balls.values():
+            blade = owner.blade
+            if blade is None or not owner.alive:
+                continue
+            blade.advance(dt)
+            for target in self.balls.values():
+                if target is owner or not target.alive:
+                    continue
+                if not blade.hits(owner.position, target.position, target.radius):
+                    continue
+                # 转过去的这一圈已经刮过它了——刀压在敌人身上是每帧都"挨着"的，
+                # 少了这一问，一秒就是 60 下
+                if not blade.consume(target.player):
+                    continue
+                target.take_damage(blade.damage)
+                self.effects.impact(owner, target,
+                                    first_takes=0.0, second_takes=blade.damage)
+        self.judge()
+
+    # ---------------- 穿刺 ----------------
+    def update_thrusts(self, dt: float) -> None:
+        """推进场上所有正在冲的穿刺：沿锁死的方向走一步，可能打中，可能撞墙。
+
+        冲的这几帧球不按自己的动量走，所以它和钩锁一样要在 Match 里单独推。
+        """
+        for ball in self.balls.values():
+            thrust = ball.thrust
+            if thrust is None:
+                continue
+            if not ball.alive:
+                ball.thrust = None
+                continue
+
+            step = min(thrust.speed * dt, thrust.remaining)
+            # 撞墙就停：这一步最多走到墙跟前，多出来的那点不补、也不反弹
+            limit = self.arena.travel_limit(ball.position, thrust.direction, ball.radius)
+            blocked = limit <= step
+            step = min(step, limit)
+
+            ball.position += thrust.direction * step
+            thrust.remaining -= step
+            landed = self.check_thrust_hit(ball, thrust)
+            if self.finished:
+                return
+            if landed or thrust.finished or blocked:
+                self.finish_thrust(ball)
+
+    def check_thrust_hit(self, ball: Ball, thrust) -> bool:
+        """冲的过程中，够不够得着对方。够着了就捅这一下，返回 True。
+
+        判的是**距离**（球面挨上），不是"方向对不对"：方向出手时就锁死了，
+        敌人要是让开了，这一路冲过去两者最近也隔着一段，够不着就是够不着。
+        所以这一问同时管住了两种躲法——横向让开、站得比冲的距离还远。
+
+        一次穿刺只打一下，打出去就把 landed 立起来。
+
+        **捅中就停在对方身前**，不接着往那个方向冲完。这一步必须做：一帧要走
+        三十来像素，够着的那一刻球已经扎进对方身体里了，不收回来就会留下一对
+        重叠的球，而下一帧的碰撞结算会把出手时那份速度整个换给对方（等质量
+        弹性碰撞，正撞是全额转移）——一次成功的穿刺反而把自己冲停在原地。
+        摆到正好相切的位置，既看得见"刀尖顶到人了"，又不给碰撞留机会。
+        """
+        if thrust.landed:
+            return False
+        for target in self.balls.values():
+            if target is ball or not target.alive:
+                continue
+            reach = ball.radius + target.radius
+            offset = target.position - ball.position
+            if offset.length() > reach:
+                continue
+            thrust.landed = True
+            ball.position.update(target.position - thrust.direction * reach)
+            target.take_damage(thrust.damage)
+            self.effects.impact(ball, target,
+                                first_takes=0.0, second_takes=thrust.damage)
+            self.judge()
+            return True
+        return False
+
+    def finish_thrust(self, ball: Ball) -> None:
+        """冲完了：收起穿刺状态，按出手时记下的那份速度接着往这个方向走。
+
+        走 set_effective_velocity 而不是直接写 velocity——那份速度是"实际速度"
+        口径（含加速、含减速折扣），直接写会把加速算两遍。
+        """
+        thrust = ball.thrust
+        ball.thrust = None
+        ball.set_effective_velocity(thrust.direction * thrust.exit_speed)
+
+    def direction_to_opponent(self, ball: Ball) -> Vector2:
+        """从这颗球指向对面那颗的单位向量。刚好重合时退回自己的朝向。"""
+        for other in self.balls.values():
+            if other is ball or not other.alive:
+                continue
+            offset = other.position - ball.position
+            if offset.length_squared() > 1e-12:
+                return offset.normalize()
+        return Vector2(ball.heading)
+
     # ---------------- 碰撞 ----------------
     def resolve_collision(self) -> None:
         """两球相撞。发生什么由角色主张，Match 只负责执行。"""
@@ -401,10 +529,12 @@ class Match:
         # 两球正好重合时法线无从谈起，随便挑一个方向把它们推开
         normal = offset / distance if distance > 0 else Vector2(1.0, 0.0)
 
-        if self._is_pulled_pair(first, second):
-            # 钩锁正把对方拖过来，这一路上两球不算碰撞——不然拖到身前那一瞬间
-            # 会先互撞一下，白扣一次血。接触标记也一并复位，好在收线结束后
-            # 重新开始算"刚贴上"
+        if self._is_pulled_pair(first, second) or first.thrust or second.thrust:
+            # 钩锁正把对方拖过来、或者有人正冲过去——这两种情况下两球都不算碰撞。
+            # 拖的时候不算，是免得拖到身前那一瞬间先互撞一下白扣一次血。冲的时候
+            # 不算，是"穿刺这一下由穿刺自己结算"：伤害、停在哪，都在
+            # update_thrusts 里定好了，碰撞再来插一脚就是重复结算。
+            # 接触标记一并复位，好在结束后重新开始算"刚贴上"
             self.touching = False
             return
 

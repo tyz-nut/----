@@ -24,7 +24,8 @@ MAX_FRAME_TIME = 0.25
 PADDING = 24                 # 各区块之间的留白
 PANEL_PADDING = 14           # 面板内部内容距面板边框的留白
 LEFT_PANEL_WIDTH = 200       # 左栏：操作按钮
-RIGHT_PANEL_WIDTH = 260      # 右栏：角色选择
+RIGHT_PANEL_WIDTH = 300      # 右栏：角色选择。两列卡片要放得下，
+                             # 比单列时宽了 40（战场仍有余量，见下）
 BOTTOM_BAR_HEIGHT = 96       # 底栏：P1/P2 操作对象
 ARENA_SIZE = 600             # 正方形战场边长
 ARENA_BORDER_WIDTH = 2       # 战场边框粗细
@@ -33,9 +34,19 @@ STATUS_HEIGHT = 60           # 左栏顶部状态文字占位
 ACTION_BUTTON_HEIGHT = 52
 ACTION_BUTTON_GAP = 14
 
-PANEL_TITLE_HEIGHT = 52      # 右栏标题占位
-CARD_HEIGHT = 92
-CARD_GAP = 14
+# ---------------- 右栏角色卡 ----------------
+# 排成 CARD_COLUMNS 列的网格。这几个数是照着"最多放得下多少张"反推的：
+# 面板可用高度 ≈ 632 - 标题 40 - 底部提示 28 = 564，一行占 CARD_HEIGHT + CARD_GAP
+# = 56，正好 10 行；两列就是 20 张。加角色超过 20 个要回头调这几个数。
+#
+# 卡片做小是因为角色会一直加，而面板高度是固定的——与其等放不下了再临时压缩，
+# 不如一次压到位。改小之后字也得更着改，见 FONT_CARD_NAME / FONT_CARD_DESC。
+CARD_COLUMNS = 2             # 卡片排几列
+CARD_HEIGHT = 48             # 单张卡的高度（里面要塞两行字，见 ui.Button.draw）
+CARD_GAP = 8                 # 行间距
+CARD_COLUMN_GAP = 8          # 列间距
+
+PANEL_TITLE_HEIGHT = 40      # 右栏标题占位。标题字号跟着降到 FONT_RIGHT_TITLE
 
 PLAYER_LABEL_WIDTH = 140     # 底栏"操作对象"文字占位
 PLAYER_BUTTON_WIDTH = 96
@@ -61,6 +72,9 @@ SEPARATION_EPSILON = 0.01    # 碰撞分离时额外推开的距离。刚好相�
 LATCH_RELEASE_SPEED = 260.0  # 吸住结束时两球弹开的速度（像素/秒）
 HOOK_RELEASE_SPEED = 260.0   # 钩锁收到底时两球相互推开的速度（像素/秒）。
                              # 和吸住分开两个数：这两件事的节奏以后大概不会一起调
+THRUST_MIN_EXIT_SPEED = 260.0  # 穿刺冲完接着走的速度下限（像素/秒）。冲刺是为了
+                               # 位移，不是为了永久提速：出手时本来就慢（刚被吸慢、
+                               # 正要停下），冲完不该比出手时还慢，所以兜一个底
 
 DEBUG_VELOCITY_SCALE = 0.25  # 调试视图里动量箭头的长度缩放（380px/s → 95px）
 
@@ -69,6 +83,13 @@ FONT_SMALL = 15
 FONT_BODY = 19
 FONT_TITLE = 22
 FONT_BIG = 40
+
+# 右栏（角色选择）单独一套小字。它跟左栏、底栏不共用，因为只有它需要
+# "同时摆很多张卡"——把通用字号调小会连带把别处也改小。
+FONT_RIGHT_TITLE = 17        # "角色"两个字
+FONT_CARD_NAME = 15          # 卡片上的角色名
+FONT_CARD_DESC = 12          # 卡片上的说明小字
+FONT_HINT = 12               # 面板底部的操作提示
 
 # ---------------- 配色 ----------------
 COLOR_BG = (14, 16, 22)
@@ -111,6 +132,16 @@ BEAM_GLOW_WIDTH = 13                   # 画在最底下的那层光晕，压得
 COLOR_BEAM_GLOW = (255, 70, 110)
 COLOR_LASER_NODE = (255, 170, 186)     # 墙面上的位点。攒着待连的那个画大一圈
 LASER_NODE_RADIUS = 5
+
+COLOR_BLADE = (214, 226, 244)          # 绕身刀。冷白的刃，和红色的激光拉开距离
+COLOR_BLADE_EDGE = (255, 255, 255)     # 刃上那一条高光，画得比刃身细
+BLADE_WIDTH = 4                        # 刃身宽度（像素）
+BLADE_EDGE_WIDTH = 1                   # 高光宽度
+BLADE_HUB_RADIUS = 3                   # 刀根那个小圆点，把刃和球连起来才不像飘着
+
+COLOR_THRUST = (120, 226, 255)         # 穿刺的拖尾。青蓝色，和别的特效都不撞色
+THRUST_TRAIL_WIDTH = 6                 # 拖尾根部的宽度（像素），往尾部收到 0
+THRUST_TRAIL_LENGTH = 90.0             # 拖尾最长拖多长（像素）
 
 # ---------------- 特效 ----------------
 # 镜头抖动。用"创伤值"模型：每次受击往上加 trauma（封顶 1.0），之后线性衰减，

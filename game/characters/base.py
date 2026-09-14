@@ -50,11 +50,8 @@ class CollisionOutcome:
 class Character:
     """角色基类。
 
-    子类通过覆盖 on_collision 描述自己的碰撞效果，通过新增字段描述自己要用的
-    参数。什么都不覆盖（如 fisher.Fisher）就是"撞人只弹开、没有任何效果"。
-
-    撞击伤害不在这里——它是普通小球独有的碰撞效果，字段和算法都在
-    normal.NormalBall 上。基类不预设任何角色"该不该撞人掉血"。
+    子类通过覆盖 on_collision 描述自己的碰撞效果，通过新增字段描述自己要用的参数。
+    默认只弹开。
     """
 
     id: str
@@ -63,13 +60,19 @@ class Character:
     max_hp: float
     description: str          # 角色卡上的第二行小字
     skill: Skill
+    passive: Skill | None = None   # 常驻被动，不占技能条。没有就是 None
+
+    def attach_passive(self, ball: Ball, match) -> None:
+        """造球的时候把常驻被动挂上去。没有被动就什么都不做。
+
+        和 skill 的区别：skill 是"冷却好了放一次"的主动技能，由 Match 每隔
+        一段时间问一次；passive 是生来就有的东西（绕身刀），只在出生这一下
+        装好，之后它自己一直在。所以这里不是"放技能"，是"装配件"。
+        """
+        if self.passive is not None:
+            self.passive.on_spawn(ball, match)
 
     def on_collision(self, ball: Ball, other: Ball) -> CollisionOutcome:
-        """默认碰撞效果：弹开，仅此而已。不掉血、不抓不封。
-
-        弹开本身不经过这里（见 CollisionOutcome 的说明），所以返回一个空主张
-        就是"什么都不附加"。
-
-        other 是留给子类的参数（比如吸血鬼不需要看它，但别的角色可能要）。
+        """默认碰撞效果：弹开
         """
         return CollisionOutcome()

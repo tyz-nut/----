@@ -194,6 +194,39 @@ class Arena:
             min(max(position.y, self.rect.top + radius), self.rect.bottom - radius),
         )
 
+    def travel_limit(self, position: Vector2, direction: Vector2,
+                     radius: int) -> float:
+        """从一个位置沿 direction 走，球心最多还能走多远。
+
+        给穿刺用的：它要"撞墙就停"，所以每帧得先问一句"这一步会不会撞到墙"，
+        撞到的话就只走剩下的那点。返回的是**球心**能走的距离（各边都缩了一个
+        半径），所以走到头正好是球面贴住墙，不会越界。
+
+        只往 direction 指向的那两边看：朝右走就永远撞不到左墙，算进去反而会
+        因为 (left - x) 是负数而把结果拖垮。方向分量接近 0 的那一轴整个跳过，
+        免得除出一个巨大的数。
+
+        已经贴在墙上（limit 为 0）时返回 0，调用方据此把冲刺收掉。
+        """
+        left = self.rect.left + radius
+        right = self.rect.right - radius
+        top = self.rect.top + radius
+        bottom = self.rect.bottom - radius
+
+        limits: list[float] = []
+        if direction.x > 1e-9:
+            limits.append((right - position.x) / direction.x)
+        elif direction.x < -1e-9:
+            limits.append((left - position.x) / direction.x)
+        if direction.y > 1e-9:
+            limits.append((bottom - position.y) / direction.y)
+        elif direction.y < -1e-9:
+            limits.append((top - position.y) / direction.y)
+
+        if not limits:
+            return 0.0          # 方向是零向量，哪也去不了
+        return max(0.0, min(limits))
+
     def wall_crossing(self, start: Vector2, end: Vector2) -> Vector2:
         """线段 start→end 与墙面的交点（start 在场内，end 已经越界）。
 

@@ -13,9 +13,11 @@ from dataclasses import dataclass, field
 import pygame
 from pygame.math import Vector2
 
+from .blade import Blade
 from .characters import Character
 from .hook import Hook
 from .laser import Beam, LaserField
+from .thrust import Thrust
 from .config import (
     BALL_SPEED_MAX,
     BALL_SPEED_MIN,
@@ -24,6 +26,7 @@ from .config import (
     COLOR_DEBUG_BOX,
     COLOR_DEBUG_VECTOR,
     PLAYER_COLORS,
+    THRUST_MIN_EXIT_SPEED,
 )
 
 
@@ -93,6 +96,12 @@ class Ball:
     # 被动的，线画出来之后技能早就"结束"了（压根没有冷却这回事），这个字段
     # 只是"我留下了什么"的账本。没撞过墙就是 None
     lasers: LaserField | None = None
+    # 绕着自己转的那把刀（武士的常驻被动）。同样是"我身上挂着什么"的账本，
+    # 不是技能生效的标记：它没有冷却也没有生效时长，出生起就在转
+    blade: Blade | None = None
+    # 正在冲的那一下穿刺。这个**是**"技能生效中"的标记（和 hook 同类）：
+    # 冲刺的这几帧球不按自己的动量走，位置由 Match.update_thrusts 摆
+    thrust: Thrust | None = None
     # 当前朝向（单位向量）。速度被清零时还得靠它决定加速那一截往哪走
     heading: Vector2 = field(default_factory=lambda: Vector2(1.0, 0.0))
 
@@ -310,6 +319,45 @@ class Ball:
             pull_speed=pull_speed,
             drain_per_second=drain_per_second,
             reel_gap=reel_gap,
+        )
+
+    def start_blade(self, angular_speed: float, inner_radius: float,
+                    outer_radius: float, damage: float) -> None:
+        """挂上一把绕身刀，从当前朝向那个角度开始转。
+
+        起始角度取 heading 而不是写死 0：写死的话每个武士的刀都从"指向右"
+        起步，同一局里双方看起来像同步的机械。跟着自己的朝向走，一眼能看出
+        刀是长在球上的。
+        """
+        self.blade = Blade(
+            angle=math.atan2(self.heading.y, self.heading.x),
+            angular_speed=angular_speed,
+            inner_radius=inner_radius,
+            outer_radius=outer_radius,
+            damage=damage,
+        )
+
+    def start_thrust(self, match, speed: float, distance: float,
+                     damage: float) -> None:
+        """朝敌人锁死一个方向冲出去。
+
+        方向在**这一刻**定下来，之后不再改——敌人跑开了就打空，这是穿刺能被
+        躲开的全部原因。这个方向也决定了冲完往哪走，所以它同时是"朝向"。
+
+        冲完接着走的速度取的是当前实际速度（含加速、含减速折扣），也就是
+        "如果没有这一下，它本来会以多快在跑"。出手前是静止的（或者刚被撞停）
+        也要留一个下限，否则冲完就定在原地不动了。
+        """
+        direction = match.direction_to_opponent(self)
+        # 冲完接着走的那份速度也锁在出手这一刻。冲刺期间球不走自己的动量，
+        # 所以不先记下来的话，收招时就没得可恢复
+        self.heading = direction
+        self.thrust = Thrust(
+            direction=direction,
+            remaining=distance,
+            speed=speed,
+            damage=damage,
+            exit_speed=max(self.speed, THRUST_MIN_EXIT_SPEED),
         )
 
     def record_wall_hit(self, point: Vector2, side: str,

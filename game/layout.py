@@ -15,6 +15,8 @@ from .config import (
     ARENA_SIZE,
     BAR_HEIGHT,
     BOTTOM_BAR_HEIGHT,
+    CARD_COLUMNS,
+    CARD_COLUMN_GAP,
     CARD_GAP,
     CARD_HEIGHT,
     GROUP_GAP,
@@ -90,15 +92,25 @@ def build_layout(window_size: tuple[int, int], character_count: int) -> Layout:
         y = buttons_top + index * (ACTION_BUTTON_HEIGHT + ACTION_BUTTON_GAP)
         action_buttons.append(pygame.Rect(inner_left, y, inner_width, ACTION_BUTTON_HEIGHT))
 
-    # --- 右栏：标题 + 角色卡 ---
+    # --- 右栏：标题 + 角色卡（按 CARD_COLUMNS 列排成网格）---
     panel_title_pos = (right_panel.left + PANEL_PADDING, right_panel.top + PANEL_PADDING)
     cards_top = right_panel.top + PANEL_TITLE_HEIGHT
     cards_left = right_panel.left + PANEL_PADDING
     cards_width = right_panel.width - 2 * PANEL_PADDING
+    # 列宽由面板宽度均分，不是写死的：左中右三栏的宽度都在 config 里，
+    # 卡片跟着面板走，改面板宽度不用回来改这里
+    card_width = (cards_width - (CARD_COLUMNS - 1) * CARD_COLUMN_GAP) // CARD_COLUMNS
+    column_pitch = card_width + CARD_COLUMN_GAP
+    row_pitch = CARD_HEIGHT + CARD_GAP
     character_cards = []
     for index in range(character_count):
-        y = cards_top + index * (CARD_HEIGHT + CARD_GAP)
-        character_cards.append(pygame.Rect(cards_left, y, cards_width, CARD_HEIGHT))
+        row, column = divmod(index, CARD_COLUMNS)
+        character_cards.append(pygame.Rect(
+            cards_left + column * column_pitch,
+            cards_top + row * row_pitch,
+            card_width,
+            CARD_HEIGHT,
+        ))
 
     # --- 底栏：每个玩家一组 [名字按钮] 血条 技能条 ---
     button_y = bottom_bar.centery - PLAYER_BUTTON_HEIGHT // 2

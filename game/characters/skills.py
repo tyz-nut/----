@@ -61,6 +61,16 @@ class Skill:
         """放出来是什么效果。子类必须覆盖。"""
         raise NotImplementedError
 
+    def on_spawn(self, ball: Ball, match: Match) -> None:
+        """球出生了（开局、换角色、重开都会走到这里）。默认什么都不做。
+
+        给**常驻被动**用的口子：激光那种被动是"撞墙的时候"才有反应，而武士
+        那把刀从出生起就一直在转，没有"触发"这回事，得有个地方把它挂上去。
+
+        在 Match 建好球之后调用，所以技能可以直接往球上写状态。
+        """
+        return
+
     def on_wall_hit(self, ball: Ball, match: Match, point, side: str) -> None:
         """球撞墙了。默认什么都不做。
 
@@ -182,3 +192,67 @@ class LaserSkill(Skill):
     def on_wall_hit(self, ball: Ball, match: Match, point: Vector2,
                     side: str) -> None:
         ball.record_wall_hit(point, side, self.damage_per_second)
+
+
+@dataclass(frozen=True)
+class BladeSkill(Skill):
+    """绕身刀：一把刀一直绕着球转，蹭到敌人扣一次血，每转一圈最多蹭一次。
+
+    这是**常驻被动**：不像激光那样等着某件事发生，从球出生的那一刻就在转，
+    所以起点是 on_spawn 而不是 activate（它永远不会被"放"，ready 也钉死成
+    False，理由和 LaserSkill 一样）。
+
+    它不占技能条——一个角色只有一根条，给武士占着的是穿刺。刀的转速和伤害
+    都不是"进度"，画成条也没意义，所以它整个不在条上，只在战场上看得见。
+    """
+
+    angular_speed: float = 4.0       # 角速度（弧度/秒）。一圈约 1.6 秒
+    inner_radius: float = 18.0       # 刀刃内端离球心多远（贴着球面）
+    outer_radius: float = 46.0       # 刀刃外端。两个数一起决定刀有多长
+    damage: float = 45.0             # 蹭一下扣多少血
+
+    def ready(self, ball: Ball) -> bool:
+        return False
+
+    def activate(self, ball: Ball, match: Match) -> None:
+        """常驻被动没有"放"这个动作。真的被调到了说明哪里写错了。"""
+        raise NotImplementedError("绕身刀是被动技能，不该被 activate")
+
+    def on_spawn(self, ball: Ball, match: Match) -> None:
+        ball.start_blade(
+            angular_speed=self.angular_speed,
+            inner_radius=self.inner_radius,
+            outer_radius=self.outer_radius,
+            damage=self.damage,
+        )
+
+
+@dataclass(frozen=True)
+class ThrustSkill(Skill):
+    """穿刺：朝敌人锁死一个方向，用极快的速度直线冲一段距离。
+
+    出手的瞬间做三件事：锁定方向（这一刻指向敌人）、记住冲完要接着走多快、
+    把这一下要打的伤害带上路。之后这几帧球归 Match.update_thrusts 管。
+
+    能不能打中看两件事，都是**冲刺途中持续判**的：
+
+    - 敌人还在不在那条线上。方向出手时就锁死了，所以敌人跑得快就能在冲过去
+      之前让开——这是这个技能最要紧的一条：它不是一个必中的锁定技。
+    - 敌人离得够不够近。冲的距离是有限的，敌人站得太远，冲到头也够不着。
+
+    够着了就**停在对方身前**收招，不接着冲完剩下的距离。冲刺期间**不算碰撞**
+    （见 Match.resolve_collision）：这一下从头到尾由穿刺自己结算，不顶开对方，
+    也不被对方顶开。
+    """
+
+    thrust_speed: float = 1800.0     # 冲刺速度（像素/秒）。比正常移速快好几倍
+    thrust_distance: float = 320.0   # 一次冲多远（像素）。撞墙就在墙前停下
+    damage: float = 120.0            # 冲到了扣这么多，一次穿刺只扣一下
+
+    def activate(self, ball: Ball, match: Match) -> None:
+        ball.start_thrust(
+            match=match,
+            speed=self.thrust_speed,
+            distance=self.thrust_distance,
+            damage=self.damage,
+        )

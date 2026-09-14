@@ -87,12 +87,38 @@
   一个半径，正好卡在判定边上）。
 
   自己的线不伤自己。线挂在 owner 身上（ball.lasers），重开、换角色都会清掉。
+
+- 武士是**唯一有两个技能的角色**：一个常驻被动（绕身刀，填在 passive 那一栏）、
+  一个主动（穿刺，填在 skill 那一栏）。被动不占技能条——角色卡和技能条都只认
+  skill，passive 是"生来就有"的配件，由 Character.attach_passive 在造球时装上，
+  之后它自己一直在，没有冷却也不会被"放"。
+
+  绕身刀的每圈伤害：刀是一个从球心往外伸的线段（inner_radius → outer_radius），
+  以 angular_speed 转。判定是"球心到这条线段的最短距离 ≤ 对方半径"，所以刀的
+  **长度**也是攻击范围的一部分。每转满一圈才清一次"这轮打过谁"的名单，也就是
+  一个敌人**每圈最多挨一下**——转多快都不会变成连续掉血，圈的时长（2π/转速）
+  才是一次伤害的间隔。
+
+  穿刺这条线要连着看三个数：thrust_speed 决定对方有多少时间让开（越慢越好躲），
+  thrust_distance 决定够不够得着（方向出手时就锁死了，敌人跑出这条线就落空），
+  damage 是这一下的全部收益。它**不是必中的锁定技**，一次冲过头就得等冷却。
+
+  够着了就停在对方身前收招，所以 thrust_distance 是**射程**，不是"一定会走完
+  的路程"：打中的那一次往往冲不到头。撞墙同理，贴着墙出手等于白放。
 """
 
-from .characters import BatSwarmSkill, BoostSkill, HookSkill, LaserSkill
+from .characters import (
+    BatSwarmSkill,
+    BladeSkill,
+    BoostSkill,
+    HookSkill,
+    LaserSkill,
+    ThrustSkill,
+)
 from .characters.fisher import Fisher
 from .characters.laser import Laser
 from .characters.normal import NormalBall
+from .characters.samurai import Samurai
 from .characters.vampire import Vampire
 
 # ============================================================
@@ -182,5 +208,38 @@ LASER = Laser(
     # 输出全在撞墙画出来的那些线上，跟撞人没关系
 )
 
+# ============================================================
+# 武士 —— 碰撞效果无，输出在两个技能上：常驻的绕身刀 + 主动的穿刺
+# ============================================================
+SAMURAI = Samurai(
+    id="samurai",
+    name="武士",
+    radius=22,
+    max_hp=500,
+    description="绕身刀 · 直线穿刺",
+    skill=ThrustSkill(
+        name="穿刺",
+        cooldown=6.0,              # 冷却秒数。冲刺本身是瞬时结算的（duration = 0），
+                                   # 所以冲完立刻开始走冷却
+        thrust_speed=1800.0,       # 冲刺速度（像素/秒）。正常移速的三到八倍，
+                                   # 对方基本来不及让开——这是这个技能的主要命中来源
+        thrust_distance=320.0,     # 一次冲多远（像素）。撞墙就在墙前停下，
+                                   # 贴着墙出手等于白放
+        damage=120.0,              # 冲到了扣这么多，一次穿刺只扣一下
+    ),
+    # 常驻被动：不占技能条，也不吃冷却。转速和伤害填在这里
+    passive=BladeSkill(
+        name="绕身刀",
+        cooldown=0.0,              # 被动用不到（ready 恒为 False），填 0 最不容易误读
+        angular_speed=4.0,         # 角速度（弧度/秒）。2π/4 ≈ 1.6 秒转一圈，
+                                   # 也就是每个敌人每 1.6 秒最多挨一下
+        inner_radius=18.0,         # 刀刃内端离球心多远（贴着球面，略小于半径 22）
+        outer_radius=46.0,         # 刀刃外端。刀比球本身长一倍，贴上去就得吃
+        damage=45.0,               # 蹭一下扣多少血
+    ),
+    # 没有撞击伤害这一项：和渔夫、激光一样走基类默认的碰撞效果——正常弹开、
+    # 不掉血。撞人本身不输出，输出全在刀和穿刺上
+)
+
 # 顺序即右栏角色卡的排列顺序
-CHARACTERS: tuple = (NORMAL, VAMPIRE, FISHER, LASER)
+CHARACTERS: tuple = (NORMAL, VAMPIRE, FISHER, LASER, SAMURAI)

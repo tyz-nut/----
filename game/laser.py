@@ -15,27 +15,14 @@ from dataclasses import dataclass, field
 
 from pygame.math import Vector2
 
+from .segment import distance_to_segment
+
 # 四面墙的名字。用字符串而不是 Enum：它只用来比相等（"这次撞的和攒着的是不是
 # 同一面"），没有别处要遍历或排序，Enum 的仪式感在这里换不来什么
 LEFT = "left"
 RIGHT = "right"
 TOP = "top"
 BOTTOM = "bottom"
-
-
-def distance_to_segment(point: Vector2, start: Vector2, end: Vector2) -> float:
-    """点到线段的最短距离。
-
-    注意是**线段**不是直线：激光只画在墙上那两个点之间，越过端点的部分不算，
-    否则球贴着墙根走也会被"延长出去的激光"打到。
-    """
-    segment = end - start
-    length_squared = segment.length_squared()
-    if length_squared <= 1e-12:
-        return (point - start).length()
-    # 把点投影到线段所在直线上，再夹到 [0, 1]——夹这一下就是"线段"和"直线"的区别
-    t = max(0.0, min(1.0, (point - start).dot(segment) / length_squared))
-    return (point - (start + segment * t)).length()
 
 
 @dataclass
@@ -52,7 +39,11 @@ class Beam:
     damage_per_second: float
 
     def hits(self, point: Vector2, radius: float) -> bool:
-        """这条线有没有碰到一个半径为 radius、圆心在 point 的球。"""
+        """这条线有没有碰到一个半径为 radius、圆心在 point 的球。
+
+        判定是**线段**不是直线：激光只画在墙上那两个点之间，越过端点的部分不算，
+        否则球贴着墙根走会被"延长出去的激光"打到。
+        """
         return distance_to_segment(point, self.start, self.end) <= radius
 
 

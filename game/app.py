@@ -8,6 +8,7 @@ from functools import partial
 from pathlib import Path
 
 import pygame
+from pygame.math import Vector2
 
 from .arena import Arena
 from .ball import Ball
@@ -18,10 +19,15 @@ from .config import (
     BEAM_CORE_WIDTH,
     BEAM_GLOW_WIDTH,
     BEAM_WIDTH,
+    BLADE_EDGE_WIDTH,
+    BLADE_HUB_RADIUS,
+    BLADE_WIDTH,
     COLOR_BG,
     COLOR_BEAM,
     COLOR_BEAM_CORE,
     COLOR_BEAM_GLOW,
+    COLOR_BLADE,
+    COLOR_BLADE_EDGE,
     COLOR_HOOK,
     COLOR_HOOK_ROPE,
     COLOR_LASER_NODE,
@@ -35,11 +41,16 @@ from .config import (
     COLOR_SKILL_SILENCED,
     COLOR_TEXT,
     COLOR_TEXT_DIM,
+    COLOR_THRUST,
     COLOR_WINNER,
     DAMAGE_NUMBER_FONT,
     DEBUG_VELOCITY_SCALE,
     FONT_BIG,
     FONT_BODY,
+    FONT_CARD_DESC,
+    FONT_CARD_NAME,
+    FONT_HINT,
+    FONT_RIGHT_TITLE,
     FONT_SMALL,
     FONT_TITLE,
     FPS,
@@ -48,6 +59,8 @@ from .config import (
     MAX_FRAME_TIME,
     PANEL_PADDING,
     PLAYER_NAMES,
+    THRUST_TRAIL_LENGTH,
+    THRUST_TRAIL_WIDTH,
     WINDOW_HEIGHT,
     WINDOW_TITLE,
     WINDOW_WIDTH,
@@ -117,7 +130,9 @@ class Game:
 
         self.fonts = {
             size: load_font(size)
-            for size in (FONT_SMALL, FONT_BODY, FONT_TITLE, FONT_BIG, DAMAGE_NUMBER_FONT)
+            for size in (FONT_SMALL, FONT_BODY, FONT_TITLE, FONT_BIG,
+                         FONT_RIGHT_TITLE, FONT_CARD_NAME, FONT_CARD_DESC, FONT_HINT,
+                         DAMAGE_NUMBER_FONT)
         }
         self.layout = build_layout(self.screen.get_size(), len(CHARACTERS))
         self.arena = Arena(self.layout.arena)
@@ -275,9 +290,15 @@ class Game:
             self.draw_lasers(ball, offset)
         for ball in self.match.balls.values():
             self.draw_hook(ball, offset)
+        for ball in self.match.balls.values():
+            self.draw_thrust_trail(ball, offset)
         self.draw_latch_link(offset)
         for ball in self.match.balls.values():
             ball.draw(self.screen, offset)
+        # 刀画在球**上面**：刀根扎在球心附近，压在球下就只剩外面半截，
+        # 看着像飘在旁边的另一件东西
+        for ball in self.match.balls.values():
+            self.draw_blade(ball, offset)
         self.match.effects.draw(self.screen, offset)
         self.draw_latch_label(offset)
 
@@ -288,13 +309,25 @@ class Game:
                 )
         self.screen.set_clip(previous_clip)
 
-        for button in self.all_buttons():
-            button.draw(self.screen, self.fonts[FONT_BODY], self.fonts[FONT_SMALL])
+        self.draw_buttons()
 
         self.draw_labels()
         self.draw_player_info()
         self.draw_result()
         pygame.display.flip()
+
+    def draw_buttons(self) -> None:
+        """画所有按钮。
+
+        角色卡单独一套小字（见 config 的"右栏角色卡"那段）：它要在固定的面板
+        高度里塞下 20 张，字号必须比别处小。其余按钮走通用的两档字号。
+        """
+        body, small = self.fonts[FONT_BODY], self.fonts[FONT_SMALL]
+        card_name, card_desc = self.fonts[FONT_CARD_NAME], self.fonts[FONT_CARD_DESC]
+        for button in self.action_buttons + self.player_buttons:
+            button.draw(self.screen, body, small)
+        for button in self.character_buttons:
+            button.draw(self.screen, card_name, card_desc)
 
     def draw_lasers(self, ball: Ball, offset) -> None:
         """画激光：光晕 + 外层 + 芯，三层叠出"发亮"的感觉。
@@ -342,6 +375,55 @@ class Game:
         if len(points) >= 2:
             pygame.draw.lines(self.screen, COLOR_HOOK_ROPE, False, points, 2)
         pygame.draw.circle(self.screen, COLOR_HOOK, points[-1], HOOK_RADIUS)
+
+    def draw_blade(self, ball: Ball, offset) -> None:
+        """画绕身刀：从球心往外伸的一段刃，加根部那个小圆点。
+
+        刃身 + 一条高光，两层就够——刀比激光细得多，再叠光晕会糊成一团，
+        看着像刀变粗了而不是变亮了。
+        """
+        blade = ball.blade
+        if blade is None:
+            return
+        start, end = blade.reach(ball.position)
+        start = (round(start.x + offset.x), round(start.y + offset.y))
+        end = (round(end.x + offset.x), round(end.y + offset.y))
+        pygame.draw.line(self.screen, COLOR_BLADE, start, end, BLADE_WIDTH)
+        pygame.draw.line(self.screen, COLOR_BLADE_EDGE, start, end, BLADE_EDGE_WIDTH)
+        pygame.draw.circle(self.screen, COLOR_BLADE, start, BLADE_HUB_RADIUS)
+
+    def draw_thrust_trail(self, ball: Ball, offset) -> None:
+        """画穿刺的拖尾：从球心**逆着**冲刺方向拖出去的一条尾巴。
+
+        拖尾长度按"还剩多少没冲"缩：刚出手时最长，快冲完就收干净。这样它
+        自己就是一根进度条——看尾巴短了就说明这一下快结束了。
+
+        形状用多边形而不是粗线：线是一头粗一头细的锥形，pygame 的 line 画不出
+        变宽，得手工给四个角。
+        """
+        thrust = ball.thrust
+        if thrust is None:
+            return
+        back = -thrust.direction
+        length = THRUST_TRAIL_LENGTH * min(1.0, thrust.remaining / THRUST_TRAIL_LENGTH)
+        if length <= 1.0:
+            return
+
+        center = ball.center_at(offset)
+        tip = Vector2(center) + back * length
+        # 垂直于冲刺方向的法线，用来把尾巴摊开成一个锥形
+        normal = Vector2(-back.y, back.x) * (THRUST_TRAIL_WIDTH / 2)
+        head = Vector2(center) + normal
+        head_other = Vector2(center) - normal
+        pygame.draw.polygon(
+            self.screen,
+            COLOR_THRUST,
+            [
+                (round(head.x), round(head.y)),
+                (round(head_other.x), round(head_other.y)),
+                (round(tip.x), round(tip.y)),
+            ],
+        )
 
     def draw_latch_link(self, offset) -> None:
         """吸住的那条连线。画在球**下面**：连的是两个圆心，画在上面就成了
@@ -399,15 +481,18 @@ class Game:
             self.screen.blit(small.render(line, True, COLOR_TEXT_DIM), (x, y))
             y += 24
 
-        # 右栏：标题 + 底部操作提示
+        # 右栏：标题 + 底部操作提示。这一栏的字比别处小，理由见 config 里
+        # "右栏角色卡"那段——面板高度固定，角色会一直加
+        hint_font = self.fonts[FONT_HINT]
         self.screen.blit(
-            title.render("角色", True, COLOR_PANEL_TITLE), self.layout.panel_title_pos
+            self.fonts[FONT_RIGHT_TITLE].render("角色", True, COLOR_PANEL_TITLE),
+            self.layout.panel_title_pos,
         )
         hint = "先选操作对象，再点角色卡"
         self.screen.blit(
-            small.render(hint, True, COLOR_TEXT_DIM),
+            hint_font.render(hint, True, COLOR_TEXT_DIM),
             (self.layout.right_panel.left + PANEL_PADDING,
-             self.layout.right_panel.bottom - PANEL_PADDING - 16),
+             self.layout.right_panel.bottom - PANEL_PADDING - hint_font.get_height()),
         )
 
         # 底栏标签
