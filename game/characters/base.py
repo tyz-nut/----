@@ -21,12 +21,15 @@ if TYPE_CHECKING:
 class CollisionOutcome:
     """角色对"撞上对手"这件事的主张。
 
-    默认主张是"弹开 + 按自身移速伤对方"。下面三样都是**可选附加项**，
-    彼此独立，角色想用哪样用哪样：
+    **撞上一定弹开**，这是碰撞的底子，不在这个主张里——主张说的是弹开之外
+    还要额外发生什么。三样附加项彼此独立，角色想用哪样用哪样，都不填就是
+    "只弹开"：
 
-    - grab_seconds > 0：改为抓住对方。**弹开**被顶替掉（双方都不弹开，改成
-      粘成一团一起飞 + 持续吸取），但 damage_to_other 照常结算——抓取只顶替
-      弹开，不免除伤害。
+    - damage_to_other > 0：这一下伤对方这么多血。想按什么算由角色自己定，
+      CollisionOutcome 只收算好的数（普通小球按移速平方算，见 normal.py）。
+    - grab_seconds > 0：抓住对方。**弹开**被顶替掉（双方都不弹开，改成粘成
+      一团一起飞 + 持续吸取），但 damage_to_other 照常结算——抓取只顶替弹开，
+      不免除伤害。
     - silences：封住对方的技能。
 
     抓取和沉默互不依赖：可以只抓不封，也可以只封不抓（以后一个"禁魔"技能
@@ -47,8 +50,11 @@ class CollisionOutcome:
 class Character:
     """角色基类。
 
-    子类通过覆盖 on_collision 改变碰撞效果，通过新增字段描述自己要用的参数。
-    什么都不覆盖（如 normal.NormalBall）就是"默认角色长什么样"的说明。
+    子类通过覆盖 on_collision 描述自己的碰撞效果，通过新增字段描述自己要用的
+    参数。什么都不覆盖（如 fisher.Fisher）就是"撞人只弹开、没有任何效果"。
+
+    撞击伤害不在这里——它是普通小球独有的碰撞效果，字段和算法都在
+    normal.NormalBall 上。基类不预设任何角色"该不该撞人掉血"。
     """
 
     id: str
@@ -57,21 +63,13 @@ class Character:
     max_hp: float
     description: str          # 角色卡上的第二行小字
     skill: Skill
-    # 撞击伤害 = 撞上瞬间的自身移速的**平方** × 该系数。0 就是"不靠撞击输出"。
-    # 覆盖了 on_collision 的角色只要还调用 super()，这个字段对它一样有效
-    # （吸血鬼就是这么做的），填了不会白填。
-    impact_damage_per_speed_sq: float = 0.0
 
     def on_collision(self, ball: Ball, other: Ball) -> CollisionOutcome:
-        """默认碰撞效果：按自身移速伤对方，随后弹开。
+        """默认碰撞效果：弹开，仅此而已。不掉血、不抓不封。
 
-        只看 ball 自己的速度，不看对方——所以谁撞得猛谁打得更疼。
-        因为是平方，快球和慢球的差距被拉得很开：速度翻倍伤害变四倍。
-        加速技能因此不只是"跑得快"，它本身就是伤害放大器。
+        弹开本身不经过这里（见 CollisionOutcome 的说明），所以返回一个空主张
+        就是"什么都不附加"。
 
         other 是留给子类的参数（比如吸血鬼不需要看它，但别的角色可能要）。
         """
-        speed = ball.speed
-        return CollisionOutcome(
-            damage_to_other=speed * speed * self.impact_damage_per_speed_sq
-        )
+        return CollisionOutcome()
