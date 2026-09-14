@@ -1,0 +1,172 @@
+"""全局配置：所有可调参数集中在这里，方便统一调参。"""
+
+# ---------------- 窗口 ----------------
+WINDOW_TITLE = "小球对决"
+WINDOW_WIDTH = 1280
+WINDOW_HEIGHT = 800
+FPS = 60
+
+# 单帧最多推进的时间（秒）。用途：卡顿（拖窗口、断点、系统休眠）后 dt 会突然变成几秒，
+# 一帧的巨大位移会把小球甩出战场且再也回不来，这里把这类畸形帧截断。
+#
+# 危险线：单步位移 > 战场可活动宽度(600 - 2*半径 = 556px) 时，镜像反弹只折返一次会失效
+#         → 380px/s 下即 dt > 1.463s。实测 dt ≤ 1.4s 时位置/速度与细分步进完全一致（误差 0）。
+# 0.25s × 380px/s = 95px，留 5.9 倍余量；且只对 4fps 以下的帧生效，不影响正常游玩。
+#
+# 注意：调大 BALL_SPEED_MAX 时要回头验算这个余量。加速技能现在是**永久叠加**的
+# （见 config_characters.py 的 spawn_speed_gain），移速会随时间越涨越高，
+# 所以这里的安全边界不再是 BALL_SPEED_MAX，而是它乘上最终的加速倍率。
+# 好消息是撞速是平方伤害，速度一高当场就见胜负，一局叠不了几档；
+# 真正要防的只是"某局莫名其妙打了很久"，那时上面那条 556px 的线才会被踩到。
+MAX_FRAME_TIME = 0.25
+
+# ---------------- 布局 ----------------
+PADDING = 24                 # 各区块之间的留白
+PANEL_PADDING = 14           # 面板内部内容距面板边框的留白
+LEFT_PANEL_WIDTH = 200       # 左栏：操作按钮
+RIGHT_PANEL_WIDTH = 260      # 右栏：角色选择
+BOTTOM_BAR_HEIGHT = 96       # 底栏：P1/P2 操作对象
+ARENA_SIZE = 600             # 正方形战场边长
+ARENA_BORDER_WIDTH = 2       # 战场边框粗细
+
+STATUS_HEIGHT = 60           # 左栏顶部状态文字占位
+ACTION_BUTTON_HEIGHT = 52
+ACTION_BUTTON_GAP = 14
+
+PANEL_TITLE_HEIGHT = 52      # 右栏标题占位
+CARD_HEIGHT = 92
+CARD_GAP = 14
+
+PLAYER_LABEL_WIDTH = 140     # 底栏"操作对象"文字占位
+PLAYER_BUTTON_WIDTH = 96
+PLAYER_BUTTON_HEIGHT = 48
+
+# 底栏每个玩家一组：[名字按钮] 血条 技能条
+HP_BAR_WIDTH = 200
+SKILL_BAR_WIDTH = 132
+BAR_HEIGHT = 22
+INFO_GAP = 12                # 组内元素间距
+GROUP_GAP = 56               # 两组之间的间距
+
+# ---------------- 小球 ----------------
+BALL_SPAWN_MARGIN = 8        # 出生点球面距墙的最小距离
+BALL_SPAWN_MIN_GAP = 30      # 两球之间的最小空隙（球面到球面的距离）
+BALL_SPAWN_MAX_TRIES = 200   # 随机撒点的最大尝试次数
+BALL_SPEED_MIN = 220.0       # 初始动量大小下限（像素/秒）
+BALL_SPEED_MAX = 380.0       # 初始动量大小上限（像素/秒）
+
+SEPARATION_EPSILON = 0.01    # 碰撞分离时额外推开的距离。刚好相切时浮点误差可能让
+                             # 心距算出 43.99999999999999，下一帧又被判定成"还在重叠"，
+                             # 接触标记就永远复位不了，之后整套伤害都会失效。
+LATCH_RELEASE_SPEED = 260.0  # 吸住结束时两球弹开的速度（像素/秒）
+HOOK_RELEASE_SPEED = 260.0   # 钩锁收到底时两球相互推开的速度（像素/秒）。
+                             # 和吸住分开两个数：这两件事的节奏以后大概不会一起调
+
+DEBUG_VELOCITY_SCALE = 0.25  # 调试视图里动量箭头的长度缩放（380px/s → 95px）
+
+# ---------------- 字体 ----------------
+FONT_SMALL = 15
+FONT_BODY = 19
+FONT_TITLE = 22
+FONT_BIG = 40
+
+# ---------------- 配色 ----------------
+COLOR_BG = (14, 16, 22)
+COLOR_PANEL = (22, 25, 34)
+COLOR_PANEL_BORDER = (44, 50, 66)
+COLOR_PANEL_TITLE = (128, 138, 160)
+
+COLOR_ARENA_FILL = (28, 32, 44)
+COLOR_ARENA_BORDER = (86, 96, 120)
+
+COLOR_BUTTON = (40, 46, 60)
+COLOR_BUTTON_HOVER = (56, 64, 84)
+COLOR_BUTTON_ACTIVE = (52, 108, 168)
+COLOR_BUTTON_DISABLED = (26, 29, 38)
+COLOR_BUTTON_BORDER = (58, 66, 86)
+COLOR_BUTTON_TEXT = (214, 222, 238)
+COLOR_BUTTON_TEXT_DISABLED = (80, 86, 102)
+
+COLOR_TEXT = (140, 150, 172)
+COLOR_TEXT_DIM = (96, 104, 124)
+
+COLOR_DEBUG_BOX = (110, 220, 140)
+COLOR_DEBUG_VECTOR = (255, 206, 84)
+COLOR_LATCH = (226, 122, 196)          # 吸住的那一对：连线 + 倒计时。不是调试专用，
+                                       # 平时也画——吸住的吸取没有别的界面能看出来
+
+COLOR_AURA_FILL = (150, 70, 190)       # 范围光环的填充（绘制时再去叠透明度）
+COLOR_AURA_RING = (198, 120, 236)      # 范围光环的描边
+
+COLOR_HOOK = (232, 226, 200)           # 钩尖那一点
+COLOR_HOOK_ROPE = (188, 168, 128)      # 钩锁的绳子（从渔夫沿折线到钩尖）
+HOOK_RADIUS = 6                        # 钩尖画多大（纯视觉，命中判定用的是对方半径）
+
+COLOR_BEAM = (255, 96, 128)            # 激光那条线。用的是偏红的亮色，
+                                       # 和扣血红字同色系——看见它就知道要掉血
+COLOR_BEAM_CORE = (255, 208, 216)      # 线的芯，画得比外层细、比外层亮
+BEAM_WIDTH = 5                         # 激光外边宽（像素）
+BEAM_CORE_WIDTH = 2                    # 激光芯的宽度
+BEAM_GLOW_WIDTH = 13                   # 画在最底下的那层光晕，压得很淡
+COLOR_BEAM_GLOW = (255, 70, 110)
+COLOR_LASER_NODE = (255, 170, 186)     # 墙面上的位点。攒着待连的那个画大一圈
+LASER_NODE_RADIUS = 5
+
+# ---------------- 特效 ----------------
+# 镜头抖动。用"创伤值"模型：每次受击往上加 trauma（封顶 1.0），之后线性衰减，
+# 实际位移取 trauma 的**平方**——平方是为了让尾巴收得干脆一点，线性位移配线性衰减
+# 会一直小幅晃，看着很烦。
+SHAKE_MAX_OFFSET = 7.0        # 创伤值满格时的最大位移（像素）
+SHAKE_DECAY = 1.7             # 创伤值每秒衰减多少（约 0.6 秒从满格归零）
+SHAKE_ON_IMPACT = 0.45        # 球撞球的基础创伤
+SHAKE_ON_BOUNCE = 0.07        # 撞墙的基础创伤
+SHAKE_DAMAGE_REFERENCE = 120.0  # 撞出这么多伤害时创伤翻倍（再多就封顶了）
+
+# 碰撞圆环：撞上的一瞬间在碰撞点炸开一个"越变越大、越变越淡"的圆
+RING_LIFETIME = 0.40          # 存活秒数
+RING_WIDTH = 3                # 线宽（像素）
+RING_RADIUS_BASE = 12.0       # 起始半径（像素）
+RING_RADIUS_PER_SQRT_DAMAGE = 4.0  # 按伤害的平方根放大，免得大伤害时圈大到糊住战场
+RING_RADIUS_MAX = 52.0        # 半径上限
+WALL_RING_LIFETIME = 0.30     # 撞墙的圆短一点、小一点，不然满屏都是圈
+WALL_RING_RADIUS = 26.0
+WALL_RING_SPEED_REFERENCE = 400.0  # 撞墙速度到这个数，圈就是满尺寸
+
+# 扣血数字
+DAMAGE_NUMBER_FONT = 26       # 字号。比正文大不少，战场上一眼能看清
+DAMAGE_NUMBER_LIFETIME = 1.30 # 存活秒数
+DAMAGE_NUMBER_RISE = 62.0     # 总共往上飘多少像素（见 effects.py 里对这个数的用法）
+DAMAGE_NUMBER_DRAG = 4.0      # 上浮的减速，越大越快停住
+DAMAGE_NUMBER_INTERVAL = 0.45 # 持续伤害（吸血）每积累这么久才报一个数字。
+                              # 不攒的话每秒会冒出 60 个，糊成一片
+DAMAGE_NUMBER_SETTLE = 0.18   # 吸血停了之后，攒着的那点零头过这么久补报出来
+COLOR_IMPACT = (255, 236, 190)  # 球撞球那个圆的颜色
+
+# 持续伤害 / 回血的数字颜色。吸血会同时产生这两种数字：被吸的一方在掉血（红），
+# 吸人的一方在回血（绿）。两边都不跟队色走——红绿一眼就能和"撞击掉血"（队色）分开。
+COLOR_DOT_TEXT = (255, 96, 96)      # 持续伤害（被吸掉的血）
+COLOR_HEAL_TEXT = (104, 232, 140)   # 回血（吸回来的血）
+
+# 进度条（血条 / 技能条）。填充色统一压暗一档，好让压在上面的浅色文字读得清。
+COLOR_BAR_BACK = (30, 34, 44)
+COLOR_BAR_BORDER = (58, 66, 86)
+
+# 技能条按状态换色，颜色的走向本身也是信息：蓝条增长 = 冷却在推进，
+# 黄条下降 = 技能还剩多久结束。
+COLOR_SKILL_READY = (44, 132, 94)      # 待发（满条）
+COLOR_SKILL_ACTIVE = (214, 172, 48)    # 黄条：技能生效中，随剩余时长**下降**
+COLOR_SKILL_COOLDOWN = (52, 112, 196)  # 蓝条：冷却中，随冷却推进**增长**
+COLOR_SKILL_SILENCED = (150, 74, 196)  # 被沉默：还是那根冷却条，只是染紫了。
+                                       # 沉默没有时长，所以条画的仍是冷却进度，
+                                       # 紫色只表示"按了也没用"
+BAR_TEXT = (238, 242, 250)
+BAR_FILL_MUTE = 0.62                   # 血条用队色压暗后的颜色
+
+COLOR_WINNER = (245, 224, 150)
+
+# 两位玩家的队色。颜色属于"玩家"而不是"角色"，所以双方选同一个角色也能分清谁是谁。
+PLAYER_NAMES = ("P1", "P2")
+PLAYER_COLORS = [
+    (64, 196, 255),   # P1 蓝
+    (255, 122, 89),   # P2 橙
+]

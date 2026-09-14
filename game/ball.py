@@ -1,0 +1,481 @@
+"""小球实体。
+
+职责边界：只管自己——计时器、位移、血量、技能留在自己身上的状态。
+撞墙由 Arena 裁定，撞球与伤害结算由 Match 裁定。
+"""
+
+from __future__ import annotations
+
+import math
+import random
+from dataclasses import dataclass, field
+
+import pygame
+from pygame.math import Vector2
+
+from .characters import Character
+from .hook import Hook
+from .laser import Beam, LaserField
+from .config import (
+    BALL_SPEED_MAX,
+    BALL_SPEED_MIN,
+    COLOR_AURA_FILL,
+    COLOR_AURA_RING,
+    COLOR_DEBUG_BOX,
+    COLOR_DEBUG_VECTOR,
+    PLAYER_COLORS,
+)
+
+
+def random_velocity() -> Vector2:
+    """随机方向 + 随机大小，得到一个初始动量。"""
+    angle = random.uniform(0.0, math.tau)
+    speed = random.uniform(BALL_SPEED_MIN, BALL_SPEED_MAX)
+    return Vector2(math.cos(angle), math.sin(angle)) * speed
+
+
+@dataclass
+class Aura:
+    """技能留在自己身上的范围光环（当前只有吸血鬼的蝙蝠圈用）。
+
+    圈是跟着自己走的，所以只需要记住参数，圆心永远是自己。
+
+    **没有自己的倒计时**——圈活多久由球上的 skill_active_remaining 说了算。
+    两处各记一份计时的话，"球说技能结束了、圈说还没"这种不一致迟早会出现，
+    而且冷却该从哪一刻开始算也会跟着含糊。统一到球上就只有一处真相。
+    """
+
+    radius: float
+    slow_ratio: float          # 圈内敌人减速比例，0.5 就是速度砍半
+    drain_per_second: float    # 每秒从圈内敌人身上吸走多少血
+
+
+@dataclass
+class Ball:
+    """一个作战单位。
+
+    尺寸来自角色（character.radius），颜色来自玩家队色（PLAYER_COLORS[player]），
+    所以两位玩家选同一个角色也能分清。
+
+    真正用来位移、撞墙、碰撞的那份速度是 effective_velocity，它由三样东西合成：
+
+    - velocity      基础速度，"没有任何加成时"的样子，也是撞墙和弹性碰撞改的那个
+    - boost_bonus   永久加速累计加出来的**绝对速度**（像素/秒），沿当前朝向加上去
+    - speed_scale   被别人减速的临时折扣，每帧由 Match 重算，默认 1.0
+
+    加速记成绝对值而不是倍率，是因为要"每档加一个固定值、跟当前速度无关"：倍率会
+    随当前速度水涨船高，被撞慢之后加的也变少。改成绝对值后就恒定加
+    spawn_speed × 技能的每档比例，不管当时是快是慢。
+
+    但绝对值不能直接加进 velocity——那等于把加成焊死在基础速度里，吸住期间速度被
+    合体速度整个覆盖时它会连同原速度一起丢掉。所以它单独存在 boost_bonus 里，
+    用的时候现加。
+
+    都是像素/秒口径，推进时必须乘 dt。
+    """
+
+    player: int
+    character: Character
+    position: Vector2
+    velocity: Vector2             # 基础速度（不含任何加成）
+    hp: float
+    spawn_speed: float = 0.0      # 出生速度的大小。加速每档加它的固定比例，是"标尺"
+    boost_stacks: int = 0         # 永久加速攒了几档
+    boost_bonus: float = 0.0      # 加速累计加出来的绝对速度（像素/秒）
+    cooldown_timer: float = 0.0   # 剩余冷却（秒）。**技能生效结束之后**才开始走
+    skill_active_remaining: float = 0.0  # 技能生效还剩几秒（0 = 没有技能在生效）
+    skill_active_total: float = 0.0      # 这次生效一共几秒，画进度条用
+    silenced: bool = False        # 技能被封印中。只是一条开关，不带时长
+    speed_scale: float = 1.0      # 被减速的折扣，每帧由 Match 重置
+    aura: Aura | None = None      # 自己身上挂着的范围光环
+    hook: Hook | None = None      # 自己甩出去的钩锁（在飞 or 正在往回拖人）
+    # 自己画在墙上的激光。和 hook 不同，它**不是技能生效的标记**——激光是
+    # 被动的，线画出来之后技能早就"结束"了（压根没有冷却这回事），这个字段
+    # 只是"我留下了什么"的账本。没撞过墙就是 None
+    lasers: LaserField | None = None
+    # 当前朝向（单位向量）。速度被清零时还得靠它决定加速那一截往哪走
+    heading: Vector2 = field(default_factory=lambda: Vector2(1.0, 0.0))
+
+    def __post_init__(self) -> None:
+        # 从 velocity 反推，这样直接构造 Ball 的场合（测试、以后的读档）
+        # 也不用调用方记得把这两个填上
+        if self.spawn_speed <= 0:
+            self.spawn_speed = self.velocity.length()
+        speed = self.velocity.length()
+        if speed > 1e-9:
+            self.heading = self.velocity / speed
+
+    @classmethod
+    def spawn(cls, player: int, character: Character, position: Vector2,
+              velocity: Vector2 | None = None) -> "Ball":
+        """满血、无冷却地生成一个球。"""
+        return cls(
+            player=player,
+            character=character,
+            position=position,
+            velocity=random_velocity() if velocity is None else velocity,
+            hp=character.max_hp,
+        )
+
+    # ---------------- 只读属性 ----------------
+    @property
+    def radius(self) -> int:
+        return self.character.radius
+
+    @property
+    def color(self) -> tuple[int, int, int]:
+        return PLAYER_COLORS[self.player]
+
+    @property
+    def center(self) -> tuple[int, int]:
+        """取整后的圆心，供 pygame 绘制接口使用。"""
+        return round(self.position.x), round(self.position.y)
+
+    def center_at(self, offset: Vector2) -> tuple[int, int]:
+        """加上镜头抖动之后的圆心。绘制走这个，物理永远用不加偏移的 position。"""
+        return round(self.position.x + offset.x), round(self.position.y + offset.y)
+
+    @property
+    def boosted(self) -> bool:
+        return self.boost_stacks > 0
+
+    @property
+    def effective_velocity(self) -> Vector2:
+        """实际用来位移、用来撞墙、用来和别的球做碰撞的那个速度。
+
+        加速那一截是**加在速度大小上**的（方向沿用当前朝向），不是乘一个倍率，
+        所以每档加的绝对值和当时的速度无关。
+        """
+        speed = self.velocity.length()
+        if speed > 1e-9:
+            # 顺手把朝向记下来。下一帧速度要是被清零了（正面对撞的极端情况），
+            # 加速那一截还得靠它决定往哪走。
+            self.heading = self.velocity / speed
+        return self.heading * (speed + self.boost_bonus) * self.speed_scale
+
+    @property
+    def speed(self) -> float:
+        """当前移速（含加速与减速）。伤害按这个算，所以加速期间撞人更疼。"""
+        return self.effective_velocity.length()
+
+    @property
+    def alive(self) -> bool:
+        return self.hp > 0
+
+    @property
+    def frozen(self) -> bool:
+        """定在原地不动。
+
+        放钩锁期间就是这样：钩锁在飞的时候人不能跑，往回拖人的时候更不能跑。
+        除了不走动量，这还意味着**霸体**——别人撞上来只会被弹回，推不动他。
+        """
+        return self.hook is not None
+
+    @property
+    def skill_active(self) -> bool:
+        """技能正在生效中。
+
+        问技能自己，而不是直接看倒计时：绝大多数技能确实按倒计时，但钩锁那种
+        "到钩中人为止"的没有预定长度，只能由挂着的状态回答。见 Skill.active。
+        """
+        return self.character.skill.active(self)
+
+    @property
+    def skill_ready(self) -> bool:
+        """能不能放技能。四道关，缺一不可：
+
+        - 冷却走完了
+        - 手上没有技能正在生效（持续型技能生效期间不该再放一次，否则每帧都会
+          刷新，圈的剩余时间永远停在满格）
+        - 没被沉默（见 Ball.silence。封它的可以是吸住，也可以是别的东西）
+        - 技能自己没说不行
+
+        这里**不看**是否已在加速中：加速是永久的、瞬时的，放完就没有"生效中"
+        这个阶段，拿它当挡箭牌会让第二次永远放不出来。
+        """
+        return (
+            self.cooldown_timer <= 0
+            and not self.skill_active
+            and not self.silenced
+            and self.character.skill.ready(self)
+        )
+
+    # ---------------- 推进 ----------------
+    def update(self, dt: float) -> None:
+        """推进一帧：先走计时器，再按当前动量位移。"""
+        self.tick(dt)
+        self.position += self.effective_velocity * dt
+
+    def tick(self, dt: float) -> None:
+        """只走计时器，不动物理。加成到期不需要做任何还原动作。
+
+        两个计时器各走各的：技能生效时长**照常走**——被沉默只是不能把技能
+        **放出来**，已经在生效的技能不会被掐断，它该结束的时候照样结束；
+        冷却则是在生效结束的那一刻才被点着（见 finish_skill），所以这里只是在
+        给一段已经开始的冷却倒数。
+
+        沉默不在这里，因为它**没有时长**：解不解封是施加方的事，见 Ball.silence。
+        """
+        if self.cooldown_timer > 0:
+            self.cooldown_timer = max(0.0, self.cooldown_timer - dt)
+        if self.skill_active_remaining > 0:
+            self.skill_active_remaining = max(0.0, self.skill_active_remaining - dt)
+            if self.skill_active_remaining <= 0.0:
+                self.finish_skill()
+
+    def reset_speed_scale(self) -> None:
+        """把减速折扣抹回 1.0。Match 每帧开头调一次。
+
+        必须每帧重置而不是"减速时设、离开时还原"：减速源可能中途消失
+        （放减速的人被打死、圈到期），漏掉任何一条还原路径，这个折扣就会
+        永久留在球上，越叠越慢最后停住。
+        """
+        self.speed_scale = 1.0
+
+    def activate_skill(self, match) -> bool:
+        """释放技能。冷却没好、正在生效、被沉默，都放不出来。
+
+        效果由技能自己决定（写到球上的某个状态里），球这边只负责计时：
+
+        - 一次性技能（duration = 0，比如加速）：效果当场结算完，立刻进冷却
+        - 持续型技能（duration > 0，比如蝙蝠圈）：先走生效时长，**这段时间不计
+          冷却**，等它结束了冷却才从零开始。所以"冷却 15 秒 + 持续 5 秒"的技能
+          两轮之间实际隔 20 秒，而条上先黄后蓝、刚好接得上
+        """
+        if not self.skill_ready:
+            return False
+        skill = self.character.skill
+        skill.activate(self, match)
+        if skill.duration > 0.0:
+            self.skill_active_remaining = skill.duration
+            self.skill_active_total = skill.duration
+        # 按倒计时生效的，上面那行已经让它 active() 为真了；按别的方式生效的
+        # （钩锁看的是 ball.hook），由技能自己的 active() 说了算。
+        # 两边都为假 = 这是一次性技能，效果当场结算完，立刻进冷却
+        if not skill.active(self):
+            self.cooldown_timer = skill.cooldown
+        return True
+
+    def finish_skill(self) -> None:
+        """技能生效结束：收掉它留下的持续效果，冷却从这一刻开始算。
+
+        清 aura 和 hook 都是无条件的，因为一个球只有一个技能槽——场上不可能存在
+        "这个球带着别人给的圈"的情况。哪天有了第二个能留持续效果的技能，这里要
+        改成按技能各自清理。
+
+        按倒计时的技能由 tick() 在倒计时归零时自动调到这里；不按倒计时的
+        （钩锁）由 Match 在它该结束的那一刻调。
+        """
+        self.skill_active_remaining = 0.0
+        self.skill_active_total = 0.0
+        self.aura = None
+        self.hook = None
+        self.cooldown_timer = self.character.skill.cooldown
+
+    # ---------------- 技能留在自己身上的状态 ----------------
+    def add_boost(self, spawn_speed_gain: float) -> None:
+        """永久加速攒一档：沿当前朝向，加"出生速度 × spawn_speed_gain"。
+
+        spawn_speed_gain 由技能给出（0.5 就是半条出生速度）。加的是绝对值，
+        所以每档涨得一样多，是线性叠加而不是越滚越快。
+        """
+        self.boost_bonus += spawn_speed_gain * self.spawn_speed
+        self.boost_stacks += 1
+
+    def start_aura(self, radius: float, slow_ratio: float,
+                   drain_per_second: float) -> None:
+        """挂上一个范围光环。重复释放就是刷新，不叠加。
+
+        这里不接收持续时长：圈活多久由 activate_skill 记在 skill_active_remaining 上。
+        """
+        self.aura = Aura(
+            radius=radius,
+            slow_ratio=slow_ratio,
+            drain_per_second=drain_per_second,
+        )
+
+    def cast_hook(self, hook_speed: float, pull_speed: float,
+                  drain_per_second: float, reel_gap: float) -> None:
+        """朝当前朝向甩出一条钩锁，出膛点在自己身前一个半径处。
+
+        往后的推进（飞、弹墙、钩中、收线）全在 Match 里，这里只负责把这一发
+        顺着朝向丢出去。朝向沿用 heading——"向原方向释放"，
+        哪怕速度已经被撞成 0（只剩加速那一截）也照样有方向。
+        """
+        muzzle = self.position + self.heading * self.radius
+        self.hook = Hook(
+            position=Vector2(muzzle),
+            velocity=self.heading * hook_speed,
+            path=[Vector2(muzzle)],
+            pull_speed=pull_speed,
+            drain_per_second=drain_per_second,
+            reel_gap=reel_gap,
+        )
+
+    def record_wall_hit(self, point: Vector2, side: str,
+                        damage_per_second: float) -> bool:
+        """撞墙记一笔，推进激光的两种模式。返回是不是**新连出了一条线**。
+
+        规则是"每两次撞到不同的墙上连一根线"，也就是一个开合：
+
+        - 普通模式撞墙 → 进入**连线模式**，把这个墙面上的点攒下来
+        - 连线模式撞**另一面**墙 → 两点连成一条激光，退回普通模式
+        - 连线模式撞**同一面**墙 → 把攒着的点挪到新位置，仍是连线模式
+
+        最后这条是"球贴着墙一路掠过去"的情形：掠墙会在同一面墙上留下很多个点，
+        要是每一下都另起一个，攒着的那个点就会被一堆没用的点淹没，连出来的线也
+        不知道从哪出发。挪过去之后，连出来的永远是"最新那一下"，好预测。
+
+        攒的点存的是**墙面上的撞点**（Arena 报上来的那个垂足），不是球心——
+        球心离墙还有一个半径，拿它连线的话激光的两头会在场子里面悬着。
+        """
+        grid = self.lasers
+        if grid is None:
+            self.lasers = grid = LaserField()
+
+        if not grid.armed:
+            grid.pending = Vector2(point)
+            grid.pending_side = side
+            return False
+
+        if side == grid.pending_side:
+            grid.pending.update(point)
+            return False
+
+        grid.beams.append(Beam(
+            start=Vector2(grid.pending),
+            end=Vector2(point),
+            damage_per_second=damage_per_second,
+        ))
+        grid.pending = None
+        grid.pending_side = ""
+        return True
+
+    def silence(self) -> None:
+        """封住技能。这是一条**通用状态**，谁都能挂——吸住会挂它，以后别的技能
+        （晕眩、禁魔、破防……）也可以挂它，球这边不关心是谁挂的。
+
+        只管开关，**不管时长**：封多久是施加方的事，施加方自己负责解封。
+        所以这里没有倒计时——未来的沉默未必是按时间解除的（"直到撞到墙为止"、
+        "直到拉开距离为止"），那种沉默根本没法用一个秒数表达。带时长的沉默
+        也应该把计时器放在施加方那边，到点了调 unsilence。
+
+        封的是"开"这个动作，不是技能本身：冷却照常在后台走，生效中的技能也
+        照常走完。所以解封的一方一松口就能接着放，不用从头等冷却。
+        """
+        self.silenced = True
+
+    def unsilence(self) -> None:
+        """解封。由施加方在它认为该结束的时刻调用。"""
+        self.silenced = False
+
+    def rebound(self, axis: str, sign: float) -> None:
+        """把球在这个轴上的运动方向定成 sign 指的那一边（撞墙的镜面反射用）。
+
+        方向和速度大小是分开存的：velocity 存"基础速度"，朝向另外记在 heading 上。
+        所以两样都得改。只改 velocity 会漏掉一种球——加速攒得很大、基础速度已经被
+        压成 0 的那种，它的 velocity 恒为 0，翻来翻去还是 0，方向其实全在 heading 上。
+        漏掉这一步，那种球会顶着墙一路滑，再也飞不回场内，对局就永远打不完了。
+        """
+        if axis == "x":
+            self.velocity.x = sign * abs(self.velocity.x)
+            self.heading.x = sign * abs(self.heading.x)
+        elif axis == "y":
+            self.velocity.y = sign * abs(self.velocity.y)
+            self.heading.y = sign * abs(self.heading.y)
+        else:
+            raise ValueError(f"未知的轴：{axis}")
+
+    def set_effective_velocity(self, velocity: Vector2) -> None:
+        """把"实际速度"写回去（反解：先除掉减速折扣，再减掉加速那一截）。
+
+        碰撞这类会重写速度的场合一律走这里，别直接赋值 self.velocity——
+        那会把这一整轮的加速直接抹掉。
+        """
+        scale = self.speed_scale
+        target = velocity / scale if scale > 1e-9 else velocity
+        speed = target.length()
+        if speed > 1e-9:
+            self.heading = target / speed
+        # 加速那一截是永久的，撞不掉：撞完剩下的速度若比它还小，基础速度就归零，
+        # 球仍然按加速那一截继续走，不会停在原地。
+        self.velocity = self.heading * max(0.0, speed - self.boost_bonus)
+
+    # ---------------- 血量 ----------------
+    def take_damage(self, amount: float) -> None:
+        self.hp = max(0.0, self.hp - amount)
+
+    def heal(self, amount: float) -> float:
+        """回血，上限是角色的满血值。返回**实际**回了多少（满血时是 0）。
+
+        返回实际量是给特效用的：不满血的那一方吸血才该飘绿字，满血还飘绿字
+        就是凭空多出来的假数字，看着像还在回血。
+        """
+        before = self.hp
+        self.hp = min(self.character.max_hp, self.hp + amount)
+        return self.hp - before
+
+    # ---------------- 绘制 ----------------
+    # offset 是镜头抖动的位移，只有绘制吃它。物理永远用不加偏移的 position，
+    # 所以震动纯粹是视觉效果，不会把球推进墙里。
+    def draw_aura(self, surface: pygame.Surface, offset: Vector2) -> None:
+        """画范围光环。要在球之前画，免得盖住球。"""
+        if self.aura is None:
+            return
+        radius = round(self.aura.radius)
+        if radius <= 0:
+            return
+
+        center = self.center_at(offset)
+        # 半透明填充靠一张带 alpha 的临时画布，pygame 的 draw.circle 不支持 alpha
+        fill = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+        pygame.draw.circle(fill, (*COLOR_AURA_FILL, 70), (radius, radius), radius)
+        surface.blit(fill, (center[0] - radius, center[1] - radius))
+        pygame.draw.circle(surface, COLOR_AURA_RING, center, radius, width=2)
+
+    def draw(self, surface: pygame.Surface, offset: Vector2) -> None:
+        center = self.center_at(offset)
+        pygame.draw.circle(surface, self.color, center, self.radius)
+        # 内圈高光，让球体看起来更有体积感；加速时换成亮白，一眼能看出谁在加速
+        highlight = (255, 255, 255) if self.boosted else tuple(
+            min(255, c + 60) for c in self.color
+        )
+        pygame.draw.circle(
+            surface, highlight, center, self.radius, width=max(2, self.radius // 6)
+        )
+
+    def draw_debug(self, surface: pygame.Surface, font: pygame.font.Font,
+                   vector_scale: float, offset: Vector2) -> None:
+        """画出碰撞箱与当前动量。"""
+        radius = self.radius
+        center = self.center_at(offset)
+
+        # 碰撞箱：圆的外接正方形
+        box = pygame.Rect(0, 0, radius * 2, radius * 2)
+        box.center = center
+        pygame.draw.rect(surface, COLOR_DEBUG_BOX, box, width=1)
+        pygame.draw.circle(surface, COLOR_DEBUG_BOX, center, 2)
+
+        # 动量矢量（按 vector_scale 缩短，否则 380px/s 的箭头比战场还长）。
+        # 画的是实际速度，所以加速期间箭头会明显变长。
+        velocity = self.effective_velocity
+        speed = velocity.length()
+        if speed > 1e-6:
+            tip = self.position + offset + velocity * vector_scale
+            tip_point = (round(tip.x), round(tip.y))
+            pygame.draw.line(surface, COLOR_DEBUG_VECTOR, center, tip_point, 2)
+
+            back = velocity / speed * 8
+            for angle in (150, -150):
+                point = tip + back.rotate(angle)
+                pygame.draw.line(surface, COLOR_DEBUG_VECTOR, tip_point,
+                                 (round(point.x), round(point.y)), 2)
+
+        label = (
+            f"P{self.player + 1} hp={self.hp:.0f} "
+            f"v=({velocity.x:.0f},{velocity.y:.0f}) |v|={speed:.0f}"
+        )
+        surface.blit(
+            font.render(label, True, COLOR_DEBUG_VECTOR),
+            (center[0] + radius + 6, center[1] - 8),
+        )
