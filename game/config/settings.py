@@ -212,9 +212,24 @@ WEB_ANCHOR_RADIUS = 3                  # 锚点画多大
 # 会一直小幅晃，看着很烦。
 SHAKE_MAX_OFFSET = 7.0        # 创伤值满格时的最大位移（像素）
 SHAKE_DECAY = 1.7             # 创伤值每秒衰减多少（约 0.6 秒从满格归零）
-SHAKE_ON_IMPACT = 0.45        # 球撞球的基础创伤
 SHAKE_ON_BOUNCE = 0.07        # 撞墙的基础创伤
-SHAKE_DAMAGE_REFERENCE = 120.0  # 撞出这么多伤害时创伤翻倍（再多就封顶了）
+
+# 命中（见 fx/impact.py）：基础 × 伤害项 × 速度项 + 额外项
+SHAKE_ON_IMPACT = 0.45        # 基础——两个角色直接撞上
+SHAKE_ON_HIT = 0.30           # 基础——技能命中（绕身刀、巨锤、穿刺）
+SHAKE_DAMAGE_REFERENCE = 120.0  # 掉到这么多伤害时，创伤翻倍（再多就封顶了）
+SHAKE_SPEED_REFERENCE = 500.0   # 相对速度到这个数，速度项拉满
+SHAKE_SPEED_SHARE = 0.6         # 速度项最多再加基础值的几成
+SHAKE_EXTRA_COLLISION = 0.15    # 额外——两个角色撞上，比普通命中多这一份
+SHAKE_EXTRA_KNOCKBACK = 0.35    # 额外——把人打飞（按打飞的速度缩放）
+SHAKE_KNOCKBACK_REFERENCE = 900.0  # 打飞到这么快时，上面那份拉满
+SHAKE_EXTRA_BITE = 0.15         # 额外——吸住咬合的那一下
+SHAKE_EXTRA_SLASH = 0.18        # 额外——幻影刺客起手挥砍
+
+# 碰上的那一下顿帧（"非常短时间"的缓时）。走的是通用时间倍速，所以和速度滑块、
+# 技能减速是**相乘**的；计时用游戏时间，见 fx/impact.py 里 HitFX.hit_stop
+HITSTOP_SECONDS = 0.06        # 顿多久
+HITSTOP_FACTOR = 0.25         # 顿的时候时间压到几倍
 
 # 碰撞圆环：撞上的一瞬间在碰撞点炸开一个"越变越大、越变越淡"的圆
 RING_LIFETIME = 0.40          # 存活秒数

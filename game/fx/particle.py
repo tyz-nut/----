@@ -16,7 +16,15 @@ from dataclasses import dataclass, field
 import pygame
 from pygame.math import Vector2
 
-from ..config.settings import DAMAGE_NUMBER_FONT
+from ..config.settings import (
+    DAMAGE_NUMBER_DRAG,
+    DAMAGE_NUMBER_FONT,
+    DAMAGE_NUMBER_LIFETIME,
+    DAMAGE_NUMBER_RISE,
+    RING_RADIUS_BASE,
+    RING_RADIUS_MAX,
+    RING_WIDTH,
+)
 
 
 @dataclass
@@ -131,6 +139,42 @@ class ParticleSystem:
 
     def clear(self) -> None:
         self.items.clear()
+
+
+# ---------------- 两个常用的造法 ----------------
+# 圈和数字是全场用得最多的两种粒子，各自的尺寸/初速怎么定写在这儿，
+# 免得每个"这里该有个圈"的地方各算一遍
+def add_ring(system: ParticleSystem, position: Vector2, color, lifetime: float,
+             end_radius: float) -> None:
+    """炸一个圈。end_radius 是涨到多大（会被 RING_RADIUS_MAX 夹住）。"""
+    system.add(RingParticle(
+        position=Vector2(position),
+        lifetime=lifetime,
+        max_lifetime=lifetime,
+        color=color,
+        start_radius=RING_RADIUS_BASE * 0.4,
+        end_radius=min(end_radius, RING_RADIUS_MAX),
+        width=RING_WIDTH,
+    ))
+
+
+def add_number(system: ParticleSystem, position: Vector2, amount: float,
+               color, prefix: str = "-") -> None:
+    """飘一个数字。初速按"总位移 = RISE"反推：drag 是每帧按比例衰减（指数衰减），
+    这种衰减下总位移 = 初速 / drag，所以初速 = RISE × drag。减速度不变的话公式
+    是另一套（少个系数），别照搬。
+    """
+    velocity = Vector2(0.0, -DAMAGE_NUMBER_RISE * DAMAGE_NUMBER_DRAG)
+    lifetime = DAMAGE_NUMBER_LIFETIME
+    system.add(TextParticle(
+        position=Vector2(position),
+        velocity=velocity,
+        lifetime=lifetime,
+        max_lifetime=lifetime,
+        color=color,
+        drag=DAMAGE_NUMBER_DRAG,
+        text=f"{prefix}{amount:.0f}",
+    ))
 
 
 def fallback_font() -> pygame.font.Font:

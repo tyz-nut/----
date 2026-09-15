@@ -10,7 +10,6 @@ Match 只负责喊"这里发生了一件事"（撞墙了、撞球了、有人在
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 from pygame.math import Vector2
@@ -19,25 +18,15 @@ from .camera import Camera
 from ..config.settings import (
     COLOR_DOT_TEXT,
     COLOR_HEAL_TEXT,
-    COLOR_IMPACT,
-    DAMAGE_NUMBER_DRAG,
     DAMAGE_NUMBER_INTERVAL,
-    DAMAGE_NUMBER_LIFETIME,
-    DAMAGE_NUMBER_RISE,
     DAMAGE_NUMBER_SETTLE,
-    RING_LIFETIME,
-    RING_RADIUS_BASE,
-    RING_RADIUS_MAX,
-    RING_RADIUS_PER_SQRT_DAMAGE,
-    RING_WIDTH,
-    SHAKE_DAMAGE_REFERENCE,
     SHAKE_ON_BOUNCE,
-    SHAKE_ON_IMPACT,
     WALL_RING_LIFETIME,
     WALL_RING_RADIUS,
     WALL_RING_SPEED_REFERENCE,
 )
-from .particle import ParticleSystem, RingParticle, TextParticle
+from .impact import HitFX
+from .particle import ParticleSystem, add_number, add_ring
 
 
 @dataclass
@@ -57,17 +46,15 @@ class _DrainCounter:
     idle: float = 0.0       # 距离上一次真的结算过了多久
 
 
-def _brighten(color: tuple[int, int, int]) -> tuple[int, int, int]:
-    """把队色提亮一档。扣血数字要用自己的队色，但原色压在深色战场上太暗了。"""
-    return tuple(min(255, channel + 90) for channel in color)
-
-
 class Effects:
     """镜头抖动 + 粒子。Match 持有它，app 每帧把它画出来。"""
 
     def __init__(self, font=None) -> None:
         self.camera = Camera()
         self.particles = ParticleSystem(font)
+        # 命中（撞上、刀、锤、穿刺）的画面反应单独封成一块，见 fx/impact.py。
+        # 持续伤害不从这里走——它只飘红字，理由是"逐帧震屏等于全程在晃"
+        self.hits = HitFX(self.particles, self.camera)
         # 屏幕边缘压暗的强度，0~1。和粒子、抖动不同，这是**状态**不是事件：
         # 所以它走"每帧重新申报"，不攒在粒子系统里（见 Match.begin_frame）
         self.vignette = 0.0
@@ -78,35 +65,23 @@ class Effects:
 
     # ---------------- 规则层喊话的接口 ----------------
     def bounce(self, position: Vector2, color: tuple[int, int, int], speed: float) -> None:
-        """球撞墙。position 是撞在墙上的那个点。"""
-        scale = min(1.0, speed / WALL_RING_SPEED_REFERENCE)
-        self._ring(position, color, WALL_RING_LIFETIME,
-                   WALL_RING_RADIUS * (0.45 + 0.55 * scale))
-        self.camera.shake(SHAKE_ON_BOUNCE * scale)
+        """球撞墙。position 是撞在墙上的那个点。
 
-    def impact(self, first, second, first_takes: float, second_takes: float) -> None:
-        """球撞球。first_takes 是 first 这一下掉了多少血，second_takes 同理。
-
-        圆环画在两球中间（接触点），大小按两边伤害之和来——撞得越狠，圈炸得越大。
+        撞墙**不算命中**，所以它不走 impact 那一套：没有伤害、也没有顿帧，
+        就一个圈加一点点抖。它只是"撞到了墙"，不是"挨了一下"。
         """
-        contact = (first.position + second.position) / 2
-        total = first_takes + second_takes
-        self._ring(contact, COLOR_IMPACT, RING_LIFETIME,
-                   RING_RADIUS_BASE + math.sqrt(total) * RING_RADIUS_PER_SQRT_DAMAGE)
-        self.camera.shake(
-            SHAKE_ON_IMPACT * min(2.0, 0.35 + total / SHAKE_DAMAGE_REFERENCE)
-        )
-        if first_takes > 0:
-            self._number(first.position, first_takes, _brighten(first.color))
-        if second_takes > 0:
-            self._number(second.position, second_takes, _brighten(second.color))
+        scale = min(1.0, speed / WALL_RING_SPEED_REFERENCE)
+        add_ring(self.particles, position, color, WALL_RING_LIFETIME,
+                 WALL_RING_RADIUS * (0.45 + 0.55 * scale))
+        self.camera.shake(SHAKE_ON_BOUNCE * scale)
 
     def drain_damage(self, player: int, position: Vector2, amount: float) -> None:
         """持续伤害，也就是吸血里"被吸的那一头"。红字。
 
         颜色不跟队色走：红 = 正在被吸，和撞击的队色数字一眼就能分开。
 
-        不震屏：吸血是每帧都在结算的，拿它抖屏幕会一直晃，那就没法看了。
+        **只飘字，不震屏**：吸血、激光、蛛丝这些是每帧都在结算的，逐帧加震动
+        等于全程一直晃。所以这个游戏里"震"等于"挨了一下"，不是"在掉血"。
         """
         counter = self._counter(self._damage_over_time, player, COLOR_DOT_TEXT, "-")
         counter.position.update(position)
@@ -145,9 +120,16 @@ class Effects:
         self.vignette = 0.0
 
     # ---------------- 推进 ----------------
-    def update(self, dt: float) -> None:
+    def update(self, dt: float, real_dt: float | None = None) -> None:
+        """dt 是**游戏时间**（已经被时间倍速缩过），粒子和镜头都走它。
+
+        real_dt 是真实流逝的时间，**只有顿帧走它**。理由见 fx/impact.py 里
+        HitFX.hit_stop 的说明：顿帧自己在压时间，用游戏时间计时会被自己拉长。
+        不传就当成没减速（两者相同）。
+        """
         self.camera.update(dt)
         self.particles.update(dt)
+        self.hits.update(dt if real_dt is None else real_dt)
 
         for table in (self._damage_over_time, self._healing):
             for counter in table.values():
@@ -158,8 +140,8 @@ class Effects:
                 if (counter.span < DAMAGE_NUMBER_INTERVAL
                         and counter.idle < DAMAGE_NUMBER_SETTLE):
                     continue
-                self._number(counter.position, counter.amount,
-                             counter.color, counter.prefix)
+                add_number(self.particles, counter.position, counter.amount,
+                           counter.color, counter.prefix)
                 counter.amount = 0.0
                 counter.span = 0.0
 
@@ -170,35 +152,7 @@ class Effects:
         """重开一局：抖到一半的残留和满屏粒子都不该带到下一局。"""
         self.camera.reset()
         self.particles.clear()
+        self.hits.reset()
         self.reset_screen()
         self._damage_over_time.clear()
         self._healing.clear()
-
-    # ---------------- 内部 ----------------
-    def _ring(self, position: Vector2, color, lifetime: float, end_radius: float) -> None:
-        self.particles.add(RingParticle(
-            position=Vector2(position),
-            lifetime=lifetime,
-            max_lifetime=lifetime,
-            color=color,
-            start_radius=RING_RADIUS_BASE * 0.4,
-            end_radius=min(end_radius, RING_RADIUS_MAX),
-            width=RING_WIDTH,
-        ))
-
-    def _number(self, position: Vector2, amount: float, color,
-                prefix: str = "-") -> None:
-        # 初速按"总位移 = RISE"反推。drag 是每帧按比例衰减（指数衰减），
-        # 这种衰减下总位移 = 初速 / drag，所以初速 = RISE × drag。
-        # 减速度不变的话公式是另一套（少个系数），别照搬。
-        velocity = Vector2(0.0, -DAMAGE_NUMBER_RISE * DAMAGE_NUMBER_DRAG)
-        lifetime = DAMAGE_NUMBER_LIFETIME
-        self.particles.add(TextParticle(
-            position=Vector2(position),
-            velocity=velocity,
-            lifetime=lifetime,
-            max_lifetime=lifetime,
-            color=color,
-            drag=DAMAGE_NUMBER_DRAG,
-            text=f"{prefix}{amount:.0f}",
-        ))

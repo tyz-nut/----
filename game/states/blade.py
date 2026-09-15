@@ -62,6 +62,18 @@ class Blade:
             self.swept -= TAU
             self.struck.clear()
 
+    def tip_velocity(self, carrier_velocity: Vector2) -> Vector2:
+        """刀尖此刻的速度 = 球的实际速度 + 绕球的切向速度。
+
+        和 Hammer.head_velocity 是同一个式子，用途也一样：命中特效要按"这一下
+        撞得多快"决定抖多重，而刀尖才是撞上去的那个东西——站着不动的武士，
+        转着的刀一样削人，光看武士自己的速度会把这一下算成 0。
+
+        切向那一项按叉乘展开成 (x, y) → (-y, x)。
+        """
+        tangent = Vector2(-self.direction.y, self.direction.x)
+        return carrier_velocity + tangent * (self.angular_speed * self.outer_radius)
+
     def hits(self, center: Vector2, point: Vector2, radius: float) -> bool:
         """刀刃有没有碰到半径为 radius、圆心在 point 的球。"""
         start, end = self.reach(center)

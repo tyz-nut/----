@@ -18,6 +18,7 @@ from .ball import Ball
 from .timescale import TimeScale
 from ..characters import Character, CollisionOutcome
 from ..fx.effects import Effects
+from ..fx.impact import Hit
 from ..states.blink import BlinkStrike
 from ..states.darkness import Darkness
 from ..states.hook import Hook, point_from_end, polyline_length
@@ -25,10 +26,13 @@ from ..config.settings import (
     BALL_SPAWN_MIN_GAP,
     BLINK_SWING_SPEED,
     COLOR_HOOK,
+    HITSTOP_FACTOR,
     HOOK_RELEASE_SPEED,
     LATCH_RELEASE_SPEED,
     PLAYER_NAMES,
     SEPARATION_EPSILON,
+    SHAKE_EXTRA_BITE,
+    SHAKE_EXTRA_SLASH,
     TIME_SCALE_DEFAULT,
 )
 
@@ -146,6 +150,11 @@ class Match:
         if darkness is not None and darkness.slowing:
             self.time_scale.push("nightfall", darkness.slow_factor)
 
+        # 碰上的那一下顿帧（见 fx/impact.py）。它也是"减速"的一种，用同一个
+        # 时间倍速，所以和滑块、技能减速是**相乘**的——顿帧叠在慢动作上还是慢动作
+        if self.effects.hits.stopping:
+            self.time_scale.push("hitstop", HITSTOP_FACTOR)
+
     def opponent(self, ball: Ball) -> Ball | None:
         """另一颗球。场上只剩自己时是 None（正常对局走不到，但技能别因此炸掉）。"""
         for other in self.balls.values():
@@ -171,11 +180,12 @@ class Match:
         # 本帧谁要让时间慢下来，先收一遍申报，**必须在算 dt 之前**。
         # 它同时清掉上一帧的画面状态（暗角），所以放在最前面
         self.begin_frame()
+        real_dt = dt                     # 顿帧要按真实时间倒计时，见下面的说明
         dt *= self.time_scale.scale
 
         # 特效先推进，而且放在 finished 判断**之前**：分出胜负的那一下也得把
         # 圈炸完、把数字飘完，不能打死人的瞬间画面就定住了
-        self.effects.update(dt)
+        self.effects.update(dt, real_dt)
         # 黑夜放在 finished 判断**之前**：打死人的那一下要是正好在黑屏里，
         # 画面也得淡回来，不能永远黑在那儿
         self.update_darkness(dt)
@@ -314,6 +324,10 @@ class Match:
     def hook_hit(self, owner: Ball, victim: Ball, hook: Hook) -> None:
         """钩中了：把对方拽到钩尖上，并把收线要走的折线准备好。"""
         hook.target = victim.player
+        # 钩住期间对方被**沉默**：钩中人是从咬住那一刻算起的，一直到松手为止
+        # （中途有人没了就在 reel_hook 那条早退里解封）。和吸住那条沉默是同一个
+        # 通用机制——封的是"开"这个动作，已经在生效的技能照常走完，冷却照常走
+        victim.silence()
         # 钩中时对方圆心离钩尖最多差一个半径，直接吸到钩尖上。这点位移看不出来，
         # 但能保证收线的起点严格落在折线上
         victim.position = Vector2(hook.position)
@@ -337,6 +351,10 @@ class Match:
         if victim is None or not victim.alive or not owner.alive:
             # 有人没了，钩锁随即作罢。走 finish_skill 收尾，好让冷却从这一刻开始
             owner.finish_skill()
+            # 钩没收到头就断了，被钩住那位的沉默得在这里解掉——解封是施加方的
+            # 责任，没人替他做（reset_outcome 也会兜一次，但那是重开时才走的）
+            if victim is not None:
+                victim.unsilence()
             return
 
         before = Vector2(victim.position)
@@ -372,6 +390,8 @@ class Match:
         owner.set_effective_velocity(-normal * push)
         victim.set_effective_velocity(normal * push)
 
+        # 松手即解封（见 hook_hit）。和吸住一样：绑多久封多久，解封是施加方的事
+        victim.unsilence()
         owner.finish_skill()
         # 推完之后两人是分开的，复位接触标记；否则下一次真撞上会被当成"还贴着"漏掉
         self.touching = False
@@ -484,8 +504,13 @@ class Match:
                 if not blade.consume(target.player):
                     continue
                 target.take_damage(blade.damage)
-                self.effects.impact(owner, target,
-                                    first_takes=0.0, second_takes=blade.damage)
+                # "撞得多快"取**刀尖**速度，不是武士自己的：站着不动的武士照样
+                # 能用转着的刀削人，看球速会把这一下算成 0
+                tip = blade.tip_velocity(owner.effective_velocity)
+                self.effects.hits.strike(Hit.on(
+                    owner, target, blade.damage,
+                    speed=(tip - target.effective_velocity).length(),
+                ))
         self.judge()
 
     # ---------------- 巨锤 ----------------
@@ -526,14 +551,23 @@ class Match:
                 # 少了这一问，一秒就是 60 下
                 if not hammer.consume(target.player):
                     continue
+                before = Vector2(target.effective_velocity)
                 launched, damage = hammer.impact(
                     owner.effective_velocity, target.effective_velocity
                 )
+                # 打飞出去多少，按**实际落下去的那一下**算。霸体的球不吃这一推，
+                # 那它就没被打飞，额外震动自然也不该有——所以先判霸体再看速度
+                knockback = 0.0
                 if not self.has_super_armor(target):
                     target.set_effective_velocity(launched)
+                    knockback = (launched - before).length()
                 target.take_damage(damage)
-                self.effects.impact(owner, target,
-                                    first_takes=0.0, second_takes=damage)
+                # "撞得多快"取**锤头**速度，它才是砸上去的那个东西
+                self.effects.hits.strike(Hit.on(
+                    owner, target, damage,
+                    speed=hammer.head_velocity(owner.effective_velocity).length(),
+                    knockback=knockback,
+                ))
         self.judge()
 
     # ---------------- 闪现突袭 ----------------
@@ -569,6 +603,10 @@ class Match:
             facing = facing.normalize()
         else:
             facing = Vector2(target.heading)
+
+        # 起手那一下额外震一份：闪现本身不造成伤害，走不到"命中"那条路上，
+        # 但它是这个技能最重的一瞬——和闪现的暗角、减速是同一时刻的三件事
+        self.effects.hits.jolt(SHAKE_EXTRA_SLASH)
 
         ball.blink = BlinkStrike(
             target=target.player,
@@ -842,8 +880,9 @@ class Match:
             thrust.landed = True
             ball.position.update(target.position - thrust.direction * reach)
             target.take_damage(thrust.damage)
-            self.effects.impact(ball, target,
-                                first_takes=0.0, second_takes=thrust.damage)
+            self.effects.hits.strike(Hit.on(
+                ball, target, thrust.damage, speed=thrust.speed,
+            ))
             self.judge()
             return True
         return False
@@ -911,11 +950,14 @@ class Match:
         # 所以被抓住的一方在被抓住的那一瞬间仍然打得出这一下。
         second.take_damage(first_wants.damage_to_other)
         first.take_damage(second_wants.damage_to_other)
-        self.effects.impact(
+        # 撞得有多快取**相对速度**：两球各自多快不重要，合起来撞得狠不狠才重要，
+        # 所以迎面对冲能撞出最大那一下。这一下也是全场唯一会顿帧的命中
+        self.effects.hits.strike(Hit.between(
             first, second,
             first_takes=second_wants.damage_to_other,
             second_takes=first_wants.damage_to_other,
-        )
+            speed=(first.effective_velocity - second.effective_velocity).length(),
+        ))
         self.judge()
         if self.finished:
             # 有人被这一下打死了，弹开还是吸住都不必再谈
@@ -1017,6 +1059,10 @@ class Match:
             drain_per_second=drain_per_second,
             silences=silences,
         )
+        # 咬合的那一下额外震一份。抓取本来就是从一次碰撞开始的（上面已经震过
+        # 一次了），这一份是"咬上了"比"撞一下"更重的那点差别
+        self.effects.hits.jolt(SHAKE_EXTRA_BITE)
+
         if silences:
             # 封的是"开"这个动作（Ball.silence 只让 skill_ready 变假），所以
             # 已经被放出来的技能不会被打断——这正是"已经开了就不能打断"的落点
