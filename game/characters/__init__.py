@@ -25,10 +25,13 @@ from .skills import (
     NightfallSkill,
     Skill,
     ThrustSkill,
+    VenomSpikeSkill,
+    VirulenceSkill,
     WebSkill,
 )
 from .spider import Spider
 from .vampire import Vampire
+from .venom import VenomSting
 
 __all__ = [
     "Character",
@@ -44,6 +47,8 @@ __all__ = [
     "NightfallSkill",
     "HammerSkill",
     "BlinkStrikeSkill",
+    "VenomSpikeSkill",
+    "VirulenceSkill",
     "NormalBall",
     "Vampire",
     "Fisher",
@@ -53,4 +58,5 @@ __all__ = [
     "Necromancer",
     "Hammer",
     "PhantomAssassin",
+    "VenomSting",
 ]

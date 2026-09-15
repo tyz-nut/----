@@ -119,6 +119,10 @@ class Match:
             ball.hook = None
             ball.lasers = None
             ball.webs = None
+            ball.spikes = None
+            # 毒是挂在**中毒的人**身上的减益，和上面那批账本不同，所以重开时
+            # 两个人身上都要清——谁中过毒光看"留下了什么"是找不到的
+            ball.venom = None
             ball.thrust = None
             # 闪现突袭是"技能生效中"的标记：留着它，重开之后刺客会带着一个
             # 指向上一局那个玩家的挥砍状态复活，而那个序号可能已经换人了
@@ -205,6 +209,11 @@ class Match:
         self.apply_blades(dt)
         self.apply_hammers(dt)
         self.apply_webs(dt)
+        # 毒刺和中毒也在这批里：刺钉在墙上、毒在身体里，两样都不看谁在动。
+        # 顺序是"先扎后毒"——这一帧新扎上去的毒立刻就开始算，同时扎上三四层
+        # 时不会因为顺序问题少算一帧
+        self.apply_spikes(dt)
+        self.apply_venoms(dt)
         # 挥砍和上面那批一样：不看谁在动。刺客已经贴上去了，对方被吸住、被
         # 钩子拖着也照样砍
         self.update_blinks(dt)
@@ -275,9 +284,11 @@ class Match:
             hit = self.arena.bounce_off_walls(ball)
             if hit is not None:
                 self.effects.bounce(hit.point, ball.color, ball.speed)
-                # 撞墙这件事光有几何还不够，被动技能（激光）要听这一声。
-                # 主动技能走 cast_ready_skills，被动技能走这里
-                ball.character.skill.on_wall_hit(ball, self, hit.point, hit.side)
+                # 撞墙这件事光有几何还不够，被动技能要听这一声（激光、蛛丝、
+                # 毒刺）。主动技能走 cast_ready_skills，被动技能走这里。
+                # 问的是**角色**不是它的 skill ——被动不一定填在 skill 那一栏，
+                # 见 Character.on_wall_hit
+                ball.character.on_wall_hit(ball, self, hit.point, hit.side)
 
     # ---------------- 钩锁 ----------------
     def update_hooks(self, dt: float) -> None:
@@ -823,6 +834,95 @@ class Match:
                 dealt = sum(web.damage_per_second for web in touched) * dt
                 target.take_damage(dealt)
                 self.effects.drain_damage(target.player, target.position, dealt)
+        self.judge()
+
+    # ---------------- 毒刺 ----------------
+    def apply_spikes(self, dt: float) -> None:
+        """结算墙上的毒刺：碰到的敌人挨一下、中毒，然后这根刺重新蓄力。
+
+        和光环、激光、蛛丝、刀同一批结算，都放在吸住/钩锁的提前返回之前——
+        被吸住、被钩着拖的人也照样会被刺扎到，刺是钉在墙上的，跟谁在动没关系。
+        被钩锁拖回来那条折线贴着墙走的时候，这一条尤其要紧。
+
+        **自己的刺不扎自己**，和激光、蛛丝同理。
+
+        一次只扎一个人（扎到就 break）：刺是**一根**针，同一瞬间被两个人碰到
+        这种情形在这个战场里不存在，但真发生了也该是"先碰到谁算谁"，而不是
+        "一根刺同时扎出两份伤害"。蓄力也一并开始，所以另一颗球接着碰也不会
+        蹭到连着的第二下。
+        """
+        for owner in self.balls.values():
+            if not owner.spikes or not owner.alive:
+                continue
+            for spike in owner.spikes:
+                spike.tick(dt)
+                # 没长好的刺不判定——它挂在那儿只是个记号，等蓄满再算
+                if not spike.armed:
+                    continue
+                for target in self.balls.values():
+                    if target is owner or not target.alive:
+                        continue
+                    if not spike.touches(target.position, target.radius):
+                        continue
+                    spike.consume()
+                    target.take_damage(spike.damage)
+                    target.poison(spike.poison_seconds, spike.poison_per_second)
+                    # 环炸在**刺**那一点上（见 Hit.at）：扎人的东西钉在墙上，
+                    # 不在任何人身上。速度取受害者自己的——它是自己撞上来的
+                    self.effects.hits.strike(Hit.at(
+                        spike.point, target, spike.damage, speed=target.speed,
+                    ))
+                    break
+        self.judge()
+
+    def apply_venoms(self, dt: float) -> None:
+        """结算中毒：每层各走各的倒计时，到点掉一层；还在走的那些每秒扣血。
+
+        **毒不分敌我，也不认下毒的人**：谁中的毒就扣谁的血，下毒的那位中途
+        死掉，毒照样走完。它不是挂在毒刺身上的持续效果，是已经进了对方身体里
+        的东西——这一点和 silence 同类，和 lasers / webs 那类"我留下了什么"
+        的账本正相反。
+
+        掉血走 effects.drain_damage（红字、攒着报），和吸血、激光、蛛丝同一路：
+        都是每帧结算的持续伤害，一帧飘一个数字会糊成一片。也**不震屏**——这个
+        游戏里"震"的含义是"挨了一下"，中毒是"在掉血"（见 fx/impact.py）。
+        """
+        for ball in self.balls.values():
+            if not ball.venom or not ball.alive:
+                continue
+            kept = []
+            dealt = 0.0
+            for stack in ball.venom:
+                if stack.tick(dt):
+                    continue
+                kept.append(stack)
+                dealt += stack.damage_per_second * dt
+            # 掉完的层从表里摘掉。层数就是列表长度（见 Ball.venom_stacks），
+            # 不摘的话技能2 会按一个虚高的层数结算
+            ball.venom = kept or None
+            if dealt <= 0.0:
+                continue
+            ball.take_damage(dealt)
+            self.effects.drain_damage(ball.player, ball.position, dealt)
+        self.judge()
+
+    def venom_burst(self, caster: Ball, target: Ball, damage: float,
+                    heal: float) -> None:
+        """毒发：伤对方这么多，回自己这么多。数值由技能算好，这里只管执行。
+
+        和 NightfallSkill 调 start_darkness 是同一个分工：技能管数值，执行
+        留在 Match——它是唯一摸得到 effects 的地方。
+
+        这一下的环炸在**中毒的人身上**，不在两人中间（见 Hit.at）：毒是从他
+        自己身体里发出来的，不是一颗从对面飞过来的东西。所以两颗球隔着半场
+        也照样"炸在他身上"。
+        """
+        target.take_damage(damage)
+        self.effects.hits.strike(Hit.at(target.position, target, damage))
+        # 回血报**实际**回的量：满血时这一下回的是 0，飘个绿字就是假数字
+        healed = caster.heal(heal)
+        if healed > 0.0:
+            self.effects.heal(caster.player, caster.position, healed)
         self.judge()
 
     # ---------------- 穿刺 ----------------

@@ -139,6 +139,22 @@ class Hit:
             knockback=knockback,
         )
 
+    @classmethod
+    def at(cls, position: Vector2, victim: Ball, damage: float,
+           speed: float = 0.0) -> "Hit":
+        """打人的**不是一颗球**的那些命中：墙上的毒刺扎到人、毒在身体里发作。
+
+        和 Hit.on 只差一个位置：那个把环炸在两人中间（那是"从对面打过来的一
+        下"），这个炸在 position 上——刺钉在墙上，环就该在墙上那一根刺那儿；
+        毒发是从挨打的人身体里冒出来的，环就在他自己身上。
+
+        所以在场的两颗球离得多远都不影响这一下的观感：它本来就不是从对手那边
+        飞过来的东西。速度那一项照常传（毒刺传的是受害者当时的速度），不传就是
+        0——毒发就没有"撞得多快"这回事。
+        """
+        damages = (Damage.of(victim, damage),) if damage > 0.0 else ()
+        return cls(position=Vector2(position), speed=speed, damages=damages)
+
     @property
     def total_damage(self) -> float:
         return sum(damage.amount for damage in self.damages)

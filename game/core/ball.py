@@ -20,6 +20,7 @@ from ..states.hammer import Hammer
 from ..states.hook import Hook
 from ..states.laser import Beam, LaserField
 from ..states.thrust import Thrust
+from ..states.venom import PoisonStack, Spike
 from ..states.web import WebAnchor
 from ..config.settings import (
     BALL_SPEED_MAX,
@@ -28,8 +29,11 @@ from ..config.settings import (
     COLOR_AURA_RING,
     COLOR_DEBUG_BOX,
     COLOR_DEBUG_VECTOR,
+    COLOR_VENOM_RING,
     PLAYER_COLORS,
     THRUST_MIN_EXIT_SPEED,
+    VENOM_STACK_RING_MAX,
+    VENOM_STACK_RING_PADDING,
 )
 
 
@@ -115,6 +119,14 @@ class Ball:
     # 自己钉在墙上的那些蛛丝锚点（蜘蛛的被动）。和 lasers 同类，是"我留下了
     # 什么"的账本。每一根的另一头都连着**现在的自己**，所以这里只存墙上那点
     webs: list[WebAnchor] | None = None
+    # 自己钉在墙上的那些毒刺（毒刺的被动）。和 webs 同类，也是"我留下了什么"
+    # 的账本。区别是它扎完一次要重新蓄力，所以那些刺是**活的**（可变），
+    # 而 WebAnchor 是 frozen 的
+    spikes: list[Spike] | None = None
+    # 自己**身上**叠着的中毒。这一条和上面那些账本都不一样：它不是"我留下了
+    # 什么"，是"我中了什么"——和 silence 同类，是挂在球上的减益。谁中的毒就
+    # 记在谁头上，跟下毒的人再无关系（那人死了毒照样走完）
+    venom: list[PoisonStack] | None = None
     # 当前朝向（单位向量）。速度被清零时还得靠它决定加速那一截往哪走
     heading: Vector2 = field(default_factory=lambda: Vector2(1.0, 0.0))
 
@@ -216,6 +228,16 @@ class Ball:
         除了不走动量，这还意味着**霸体**——别人撞上来只会被弹回，推不动他。
         """
         return self.hook is not None
+
+    @property
+    def venom_stacks(self) -> int:
+        """身上叠着几层毒。
+
+        **层数就是列表长度**，不另记一个计数：两处各记一份的话，"毒掉完了但
+        计数还留着"这种不一致迟早出现，而技能2 的伤害完全由这个数决定——
+        报错一层就是一整下的偏差。
+        """
+        return 0 if self.venom is None else len(self.venom)
 
     @property
     def skill_active(self) -> bool:
@@ -477,6 +499,46 @@ class Ball:
             slow_ratio=slow_ratio,
         ))
 
+    def plant_spike(self, point: Vector2, side: str, size: float, damage: float,
+                    poison_seconds: float, poison_per_second: float,
+                    cooldown: float) -> None:
+        """在墙上钉一根毒刺。
+
+        数值全部**烤进这一根**（和 anchor_web 烤 damage/slow 同理）：以后调
+        技能参数不会把墙上已有的旧刺一起改掉。side 是留着绘制用的——刺画成
+        从墙面往场内扎的一根，得知道哪边是场内。
+
+        没有上限，也不会过期，和激光、蛛丝一个道理：这就是这个角色的成长曲线。
+        """
+        if self.spikes is None:
+            self.spikes = []
+        self.spikes.append(Spike(
+            point=Vector2(point),
+            side=side,
+            size=size,
+            damage=damage,
+            poison_seconds=poison_seconds,
+            poison_per_second=poison_per_second,
+            cooldown=cooldown,
+        ))
+
+    def poison(self, seconds: float, damage_per_second: float) -> None:
+        """中毒：**加一层**，不是刷新。
+
+        "加一层"和"刷新时长"是两种完全不同的叠法，这里选的是前者（用户定的
+        "每层各走各的倒计时"）：连挨三下就是三个独立的沙漏错开着漏，谁先到点
+        谁先掉。所以层数会自己慢慢褪下去，而不是"一直挂着一层、只是变长"。
+
+        一条上限都没有：毒刺的伤害才是它的天花板，不是层数。真叠到十几层，
+        按每层每秒的伤害算自然就疼得离谱了。
+        """
+        if self.venom is None:
+            self.venom = []
+        self.venom.append(PoisonStack(
+            remaining=seconds,
+            damage_per_second=damage_per_second,
+        ))
+
     def silence(self) -> None:
         """封住技能。这是一条**通用状态**，谁都能挂——吸住会挂它，以后别的技能
         （晕眩、禁魔、破防……）也可以挂它，球这边不关心是谁挂的。
@@ -558,6 +620,21 @@ class Ball:
         pygame.draw.circle(fill, (*COLOR_AURA_FILL, 70), (radius, radius), radius)
         surface.blit(fill, (center[0] - radius, center[1] - radius))
         pygame.draw.circle(surface, COLOR_AURA_RING, center, radius, width=2)
+
+    def draw_venom(self, surface: pygame.Surface, offset: Vector2) -> None:
+        """画中毒：球外面套一圈毒绿，**层数越多越粗**。
+
+        和光环一样画在球**之前**——这圈是贴在球面上的，盖上去会像球变胖了。
+        粗细封顶在 VENOM_STACK_RING_MAX 层：再往上叠圈会一直长，叠到十几层
+        时那圈能糊掉半个战场，而"很毒"这件事到这个粗细已经说清楚了。
+        """
+        stacks = self.venom_stacks
+        if stacks <= 0:
+            return
+        center = self.center_at(offset)
+        radius = self.radius + VENOM_STACK_RING_PADDING
+        width = max(2, min(stacks, VENOM_STACK_RING_MAX))
+        pygame.draw.circle(surface, COLOR_VENOM_RING, center, radius, width)
 
     def draw(self, surface: pygame.Surface, offset: Vector2) -> None:
         center = self.center_at(offset)

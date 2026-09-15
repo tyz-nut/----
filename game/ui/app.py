@@ -11,13 +11,14 @@ from pathlib import Path
 import pygame
 from pygame.math import Vector2
 
-from ..core.arena import Arena
+from ..core.arena import BOTTOM, LEFT, RIGHT, TOP, Arena
 from ..core.ball import Ball
 from ..characters import (
     BlinkStrikeSkill,
     Character,
     HammerSkill,
     LaserSkill,
+    VirulenceSkill,
     WebSkill,
 )
 from ..config.settings import (
@@ -53,9 +54,12 @@ from ..config.settings import (
     COLOR_SKILL_COOLDOWN,
     COLOR_SKILL_READY,
     COLOR_SKILL_SILENCED,
+    COLOR_SPIKE_SPENT,
     COLOR_TEXT,
     COLOR_TEXT_DIM,
     COLOR_THRUST,
+    COLOR_VENOM,
+    COLOR_VENOM_CORE,
     COLOR_WEB,
     COLOR_WEB_ANCHOR,
     COLOR_VIGNETTE,
@@ -88,6 +92,7 @@ from ..config.settings import (
     TIME_SCALE_DEFAULT,
     TIME_SCALE_MAX,
     TIME_SCALE_MIN,
+    VENOM_SPIKE_WIDTH,
     VIGNETTE_BUILD_SIZE,
     VIGNETTE_INNER,
     VIGNETTE_MAX_ALPHA,
@@ -128,6 +133,15 @@ SHORTCUTS = (
     "D      调试",
     "Esc    退出",
 )
+
+# 毒刺钉在哪面墙上，就往哪个方向扎出来（指向场内）。刺在数据里只记了 side，
+# 这里是"side 到底朝哪边"唯一落地的地方——画三角形要用它
+SPIKE_NORMALS = {
+    LEFT: Vector2(1.0, 0.0),
+    RIGHT: Vector2(-1.0, 0.0),
+    TOP: Vector2(0.0, 1.0),
+    BOTTOM: Vector2(0.0, -1.0),
+}
 
 _FONT_DIR = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
 _FONT_FILES = ("msyh.ttc", "simhei.ttf", "simsun.ttc", "NotoSansCJK-Regular.ttc")
@@ -386,11 +400,17 @@ class Game:
         # 一根穿过球体的棍子。画在激光之后，免得被线多的激光盖住
         for ball in self.match.balls.values():
             self.draw_webs(ball, offset)
+        # 毒刺也画在球下面：它是钉在墙上的东西，球贴着墙压过去的时候该盖住它
+        for ball in self.match.balls.values():
+            self.draw_spikes(ball, offset)
         for ball in self.match.balls.values():
             self.draw_hook(ball, offset)
         for ball in self.match.balls.values():
             self.draw_thrust_trail(ball, offset)
         self.draw_latch_link(offset)
+        # 中毒的圈和光环一样在球**之前**画：它是套在球面上的，盖上去像球变胖了
+        for ball in self.match.balls.values():
+            ball.draw_venom(self.screen, offset)
         for ball in self.match.balls.values():
             ball.draw(self.screen, offset)
         # 刀画在球**上面**：刀根扎在球心附近，压在球下就只剩外面半截，
@@ -507,6 +527,36 @@ class Game:
             pygame.draw.line(self.screen, COLOR_WEB, start, end, WEB_WIDTH)
             pygame.draw.circle(self.screen, COLOR_WEB_ANCHOR, end,
                                WEB_ANCHOR_RADIUS)
+
+    def draw_spikes(self, ball: Ball, offset) -> None:
+        """画毒刺：从墙面往场内扎的一个小三角。
+
+        刺是**钉在墙上**的，所以它和蛛丝那种"一头连着自己"的线完全不同：
+        这里只需要一个点加一个方向，方向由 side 定死。
+
+        没蓄好的刺画暗一档——它是看得见但暂时不扎人的，玩家得能分出来现在
+        站过去安不安全。这不是可有可无的装饰：一根刺 1.5 秒就能再扎一次，
+        "现在能不能踩"是这个角色对局里最要紧的一条信息。
+        """
+        if not ball.spikes:
+            return
+        for spike in ball.spikes:
+            base = Vector2(spike.point) + offset
+            normal = SPIKE_NORMALS[spike.side]
+            # 三角形的底边在墙上、尖朝场内。底边拿切向撑开
+            tangent = Vector2(-normal.y, normal.x) * (VENOM_SPIKE_WIDTH / 2)
+            tip = base + normal * spike.size
+            points = [
+                (round(base.x + tangent.x), round(base.y + tangent.y)),
+                (round(base.x - tangent.x), round(base.y - tangent.y)),
+                (round(tip.x), round(tip.y)),
+            ]
+            color = COLOR_VENOM if spike.armed else COLOR_SPIKE_SPENT
+            pygame.draw.polygon(self.screen, color, points)
+            if spike.armed:
+                # 蓄好的刺加一道亮边。刺很小，光靠填充色在一堆墙上的东西里
+                # 认不出来
+                pygame.draw.polygon(self.screen, COLOR_VENOM_CORE, points, 1)
 
     def draw_blade(self, ball: Ball, offset) -> None:
         """画绕身刀：从球心往外伸的一段刃，加根部那个小圆点。
@@ -773,6 +823,8 @@ class Game:
             return self.hammer_display(ball)
         if isinstance(skill, BlinkStrikeSkill):
             return self.blink_display(ball, skill)
+        if isinstance(skill, VirulenceSkill):
+            return self.virulence_display(ball, skill)
 
         if ball.skill_active:
             hook = ball.hook
@@ -894,13 +946,41 @@ class Game:
             return self.cooldown_display(ball, skill, COLOR_SKILL_COOLDOWN)
         return ("伺机而动", 1.0, COLOR_SKILL_READY)
 
-    def cooldown_display(self, ball: Ball, skill, color
+    def virulence_display(self, ball: Ball, skill: VirulenceSkill
+                          ) -> tuple[str, float, tuple[int, int, int]]:
+        """毒刺的技能条。
+
+        技能2 本身是一个普通得不能再普通的主动技能：有冷却、一次性结算、放完
+        立刻进冷却。所以条的走向完全走通用那套，这里只是**多报一个数**——
+        对手身上现在有几层毒。
+
+        这个数必须报：它决定技能2 打多少、回多少，而它是画在**对手**身上的
+        一圈绿边，粗到什么程度全靠眼看。玩家要判断"现在放值不值"，得有个准数。
+
+        画的是对手的层数而不是自己的，这一点和别的角色都不一样——别的角色的
+        技能条讲的都是"我自己怎么样了"。
+        """
+        target = self.match.opponent(ball)
+        stacks = 0 if target is None else target.venom_stacks
+        # 条宽有限（SKILL_BAR_WIDTH），层数只在有得可报的时候才挤上去
+        tag = f" {stacks}层" if stacks > 0 else ""
+
+        if ball.silenced:
+            return self.cooldown_display(ball, skill, COLOR_SKILL_SILENCED, tag)
+        if ball.cooldown_timer > 0:
+            return self.cooldown_display(ball, skill, COLOR_SKILL_COOLDOWN, tag)
+        return (f"{skill.name}{tag}", 1.0, COLOR_SKILL_READY)
+
+    def cooldown_display(self, ball: Ball, skill, color, tag: str = ""
                          ) -> tuple[str, float, tuple[int, int, int]]:
-        """只画冷却进度的那一小段，给不走通用分支的技能复用。"""
+        """只画冷却进度的那一小段，给不走通用分支的技能复用。
+
+        tag 是给调用方补的一截额外说明（毒刺用它把对手的毒层数接在后面）。
+        """
         if ball.cooldown_timer <= 0:
-            return ("沉默", 1.0, color)
+            return (f"沉默{tag}", 1.0, color)
         return (
-            f"冷却 {ball.cooldown_timer:.1f}s",
+            f"冷却 {ball.cooldown_timer:.1f}s{tag}",
             1.0 - ball.cooldown_timer / skill.cooldown,
             color,
         )

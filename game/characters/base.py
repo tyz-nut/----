@@ -79,6 +79,20 @@ class Character:
         if self.passive is not None:
             self.passive.on_spawn(ball, match)
 
+    def on_wall_hit(self, ball: Ball, match, point, side: str) -> None:
+        """球撞墙了，谁想听谁听。
+
+        **两栏都要问**，理由和 attach_passives 一模一样：撞墙触发的被动不保证
+        放在哪一栏——激光、蜘蛛那种"整个角色就一个被动、没有主动技能"的填在
+        skill 上，而毒刺和武士一样有两栏：主动的毒发占着 skill，被动的刺填在
+        passive。只问 skill 的话，毒刺的刺永远钉不上墙。
+
+        以后再加"撞墙触发"的角色，照旧不用改这里——填哪一栏都会被问到。
+        """
+        self.skill.on_wall_hit(ball, match, point, side)
+        if self.passive is not None:
+            self.passive.on_wall_hit(ball, match, point, side)
+
     def on_collision(self, ball: Ball, other: Ball) -> CollisionOutcome:
         """默认碰撞效果：弹开
         """

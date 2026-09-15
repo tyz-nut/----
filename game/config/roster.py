@@ -182,6 +182,33 @@
   速度没有上限，所以这一锤**有可能把球甩得比 MAX_FRAME_TIME 那条安全线还快**
   （config/settings.py 里那段 556px 的推导）。真甩出去了就是穿透墙面飞出场外，
   那一条只影响"某局莫名其妙打了很久"时的观感，先记在这儿。
+
+- 毒刺和武士一样是**两个技能**：被动的刺填在 passive，主动的毒发填在 skill。
+  两个技能咬合得很紧，单看哪一个都不成立：
+
+  刺是撞墙触发的（和激光、蛛丝同类），但它的触发方式是三者里独一份——
+  激光要撞两面墙才连出一条线，蛛丝一头连着自己会跟着扫，而刺是**钉死在墙上
+  且会反复触发**的：扎完一次过 spike_cooldown 秒重新长好，同一根刺能扎同一个
+  人很多次。所以刺不是地雷，是一台一直在出毒的机器。
+
+  于是叠毒速度 = **对手在刺旁边待多久 ÷ spike_cooldown**，不是刺的数量。
+  被逼到墙上、被钩锁拖回来贴着墙走、被刀逼着退到墙边，都会在几秒之内叠起
+  好几层。6 秒 / 1.5 秒 = 一根刺最多同时挂着 4 层，这是这个数对的账。
+
+  中毒是**每层各走各的倒计时**（用户定的）：连挨三下就是三个错开的沙漏，
+  最先扎的先漏完。所以层数会自己褪下去，停下来就没了——它不是"挂着一层毒
+  然后一直变长"那种。层数**没有上限**：真叠到十几层，按 poison_per_second
+  算自然就疼得离谱了，不需要再设一个盖子。
+
+  毒发是主动技能（有冷却、一次性结算），**按对手此刻的毒层数**造成伤害并回
+  自己的血，两样各带一个基础值——所以 0 层时也放得出，只是那一下最轻。
+
+  它是**只读不消耗**的（用户定的）：层数照常走自己的倒计时，毒发只是"看一眼
+  现在有几层"。所以这是纯输出技——毒叠上去就一直在高点，不存在"放完要重新叠"
+  的节奏。它真正的意义是把刺攒出来的优势一次性兑现，而不是一个消耗品。
+
+  毒刺**永久不封顶**（用户定的，同激光和蛛丝）。所以后期墙上会积很多根，
+  对手能贴墙走的地方越来越少——这是它唯一的成长曲线，活得越久越强。
 """
 
 from ..characters import (
@@ -194,6 +221,8 @@ from ..characters import (
     LaserSkill,
     NightfallSkill,
     ThrustSkill,
+    VenomSpikeSkill,
+    VirulenceSkill,
     WebSkill,
 )
 from ..characters.assassin import PhantomAssassin
@@ -205,6 +234,7 @@ from ..characters.normal import NormalBall
 from ..characters.samurai import Samurai
 from ..characters.spider import Spider
 from ..characters.vampire import Vampire
+from ..characters.venom import VenomSting
 
 # ============================================================
 # 普通小球 —— 碰撞走基类的默认行为，技能走通用的加速
@@ -433,8 +463,42 @@ PHANTOM = PhantomAssassin(
     # 碰撞效果：无。撞上了就是正常弹开，跟普通小球一样——它的本事全在闪现里
 )
 
+# ============================================================
+# 毒刺 —— 碰撞效果无，靠撞墙留下的毒刺叠毒，再用毒发兑成伤害和回血
+# ============================================================
+VENOM = VenomSting(
+    id="venom",
+    name="毒刺",
+    radius=22,
+    max_hp=500,
+    description="撞墙留刺 · 叠毒爆发",
+    # 和武士一样是**两个技能**：被动（刺）填在 passive，主动（毒发）填在 skill
+    skill=VirulenceSkill(
+        name="毒发",
+        cooldown=8.0,              # 一次性结算（duration = 0），放完立刻进冷却
+        base_damage=40.0,          # 0 层时也有的一份。所以不是"没毒就白放"
+        damage_per_stack=30.0,     # 每层再加这么多
+        base_heal=20.0,
+        heal_per_stack=15.0,
+    ),
+    # 常驻被动：不占技能条，也不吃冷却。刺的数值填在这里
+    passive=VenomSpikeSkill(
+        name="毒刺",
+        cooldown=0.0,              # 被动用不到（ready 恒为 False），填 0 最不容易误读
+        spike_size=16.0,           # 刺有多"大"：判定上等于给对方的半径加这么多。
+                                   # 所以擦着墙从刺旁边过去也算扎到，不用正对着撞
+        spike_damage=40.0,         # 扎到那一下的一次性伤害（走普通命中那一套）
+        spike_cooldown=1.5,        # 扎完一次要等这么久才能再扎。**这个数决定
+                                   # 叠毒速度**：对手在刺旁边待 6 秒，最多叠 4 层
+        poison_seconds=6.0,        # 每扎一次叠上去的那层毒活多久
+        poison_per_second=8.0,     # **每一层**每秒掉多少血，层层叠加
+    ),
+    # 没有撞击伤害这一项：和渔夫、激光、武士、蜘蛛、大锤一样走基类默认的
+    # 碰撞效果——正常弹开、不掉血。输出全在刺和毒发上，跟撞人没关系
+)
+
 # 顺序即右栏角色卡的排列顺序
 CHARACTERS: tuple = (
     NORMAL, VAMPIRE, FISHER, LASER, SAMURAI, SPIDER, NECROMANCER, HAMMER,
-    PHANTOM,
+    PHANTOM, VENOM,
 )

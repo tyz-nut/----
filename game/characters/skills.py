@@ -233,6 +233,86 @@ class WebSkill(Skill):
 
 
 @dataclass(frozen=True)
+class VenomSpikeSkill(Skill):
+    """毒刺：撞一次墙就在墙上留一根毒刺，碰到的敌人挨一下并且中毒。
+
+    和激光、蛛丝同属**触发式被动**（走 on_wall_hit，ready 钉死成 False，
+    不占技能条），但三者的"留下的东西"完全不是一回事：
+
+    - 激光要撞够**两面不同的墙**才连出一条线，那条线跟人再没关系。
+    - 蛛丝撞一下出一根，**一头永远连着自己**，所以它会跟着人扫。
+    - 毒刺撞一下出一根，**钉死在墙上**，但它是唯一会**反复触发**的：
+      扎完一次过一会儿重新长好，同一根刺可以扎同一个人很多次。
+
+    最后这条是这个角色的全部：刺不是一次性的地雷，是一台一直在出毒的机器。
+    所以"叠毒"这件事不靠多钉几根，靠的是对手在刺旁边待多久——被逼到墙上、
+    被钩过来、被刀逼着贴墙走，都会在几秒之内叠起好几层。
+
+    刺**永久不封顶**（用户定的，同激光和蛛丝），蓄力间隔见 spike_cooldown。
+    """
+
+    spike_size: float = 16.0        # 刺有多"大"。判定上等于给对方的半径加这么多
+    spike_damage: float = 40.0      # 扎到那一下的一次性伤害（就是普通命中那一下）
+    spike_cooldown: float = 1.5     # 扎完一次要等这么久才能再扎
+    poison_seconds: float = 6.0     # 每扎一次叠上去的那层毒活多久
+    poison_per_second: float = 8.0  # 那一层每秒掉多少血。**层层叠加**
+
+    def ready(self, ball: Ball, match: Match) -> bool:
+        return False
+
+    def activate(self, ball: Ball, match: Match) -> None:
+        """被动技能没有"放"这个动作。真的被调到了说明哪里写错了。"""
+        raise NotImplementedError("毒刺是被动技能，不该被 activate")
+
+    def on_wall_hit(self, ball: Ball, match: Match, point: Vector2,
+                    side: str) -> None:
+        ball.plant_spike(
+            point, side,
+            size=self.spike_size,
+            damage=self.spike_damage,
+            poison_seconds=self.poison_seconds,
+            poison_per_second=self.poison_per_second,
+            cooldown=self.spike_cooldown,
+        )
+
+
+@dataclass(frozen=True)
+class VirulenceSkill(Skill):
+    """毒发：让对手身上此刻的毒一次性发作——伤人，并回自己的血。
+
+    两样都按**对手当前的毒层数**涨，各带一个基础值：一层都没有时也放得出，
+    只是那一下最轻（用户定的"有个基础伤害和回血量"）。所以这不是一个"没毒
+    就白放"的技能——但它真正的收益全在层数上，层数高了才值得放。
+
+    **只读不消耗**（用户定的）：层数照常按各自的倒计时走，这个技能只是
+    "看一眼现在有几层"。所以毒叠上去就一直在高点，不存在"放完要重新叠"的
+    节奏——它是一个把毒刺攒出来的优势兑成伤害和续航的出口，不是一个消耗品。
+
+    回血报的是**实际**回的量（Ball.heal 的返回值）：满血时这一下回的是 0，
+    飘个绿字就成了凭空多出来的数字。
+
+    伤害走 Match.venom_burst，不在这里直接调特效——理由和 NightfallSkill
+    调 match.start_darkness 一样：技能管数值，执行留给 Match。
+    """
+
+    base_damage: float = 40.0       # 0 层时也有的那一份
+    damage_per_stack: float = 30.0  # 每一层再加这么多
+    base_heal: float = 20.0
+    heal_per_stack: float = 15.0
+
+    def activate(self, ball: Ball, match: Match) -> None:
+        target = match.opponent(ball)
+        if target is None:
+            return
+        stacks = target.venom_stacks
+        match.venom_burst(
+            ball, target,
+            damage=self.base_damage + self.damage_per_stack * stacks,
+            heal=self.base_heal + self.heal_per_stack * stacks,
+        )
+
+
+@dataclass(frozen=True)
 class NightfallSkill(Skill):
     """黑夜降临：战场黑一下，黑到底的那一瞬双方互换位置与血量。
 
