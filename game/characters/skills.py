@@ -238,6 +238,10 @@ class NightfallSkill(Skill):
     黑屏和换位是同一根时间轴上的两件事，对上关系见 darkness.py：换位卡在渐暗
     走完的那一瞬，藏在那片黑里。
 
+    **换不换是"放的人说了算"的**：只有放技能这位自己的血量百分比低于对手时才
+    真的换，否则黑屏照播、场面纹丝不动（纯演出）。所以这一场黑夜得记住是谁放的
+    ——caster 跟着 Darkness 走，见 Match.start_darkness。
+
     换位换什么、不换什么（尤其是霸体和被吸住的时候怎么办），写在
     Match.nightfall_swap 上——那是这一整套里唯一真正需要想清楚的地方。
     """
@@ -245,7 +249,55 @@ class NightfallSkill(Skill):
     duration: float = 1.2    # 整段黑屏几秒。三段的比例在 config/settings.py
 
     def activate(self, ball: Ball, match: Match) -> None:
-        match.start_darkness(self.duration)
+        match.start_darkness(self.duration, ball.player)
+
+
+@dataclass(frozen=True)
+class HammerSkill(Skill):
+    """巨锤：一把锤子一直在自己身边抡，砸中就把敌人打飞。
+
+    和绕身刀同属**常驻被动**（从出生起就在抡，起点是 on_spawn，ready 钉死成
+    False，不占技能条），几何也几乎一样，但打中之后干的事完全不同：
+
+    - 刀是"蹭一下扣一次血"，对方该怎么飞还怎么飞。
+    - 锤子是**打飞**：对方的速度被整个重写。
+
+    那个"飞"不是随手加一股冲量，是**对方撞上了一面正在移动的、无限质量的墙**
+    的完全弹性碰撞结果（v' = 2u - v，u 是锤头速度）。整套推导和"为什么它不
+    守恒动量"写在 states/hammer.py 的开头，这里只管把数值挂上去。
+
+    伤害同理，按锤头与敌人的**相对**速度平方算——伤害系数那一项也在那边解释。
+
+    打不飞的情况只有一种：对方是**霸体**（甩着钩锁的渔夫、被吸住的球）。霸体
+    顶替的是"被推动"，所以那一锤**照样掉血，只是纹丝不动**——和渔夫那条
+    "霸体只顶替被推动、伤害照常两边各算各的"是同一条原则。
+
+    它不占技能条（和刀一样，角色只有一根条）：锤子的转速、长度、当前锤头有
+    多快都不是"进度"，画成条没意义。大锤这个角色就这一个被动，条上写什么由
+    app.hammer_display 单独接管。
+    """
+
+    angular_speed: float = 3.2       # 角速度（弧度/秒）。一圈约 2 秒
+    inner_radius: float = 20.0       # 柄的内端离球心多远（贴着球面）
+    outer_radius: float = 72.0       # 柄的外端，也就是锤头中心离球心多远
+    head_radius: float = 16.0        # 锤头多大。判定用的是它，不是球半径
+    damage_per_speed_sq: float = 0.0006   # 伤害 = 相对速度² × 这个系数
+
+    def ready(self, ball: Ball) -> bool:
+        return False
+
+    def activate(self, ball: Ball, match: Match) -> None:
+        """常驻被动没有"放"这个动作。真的被调到了说明哪里写错了。"""
+        raise NotImplementedError("巨锤是被动技能，不该被 activate")
+
+    def on_spawn(self, ball: Ball, match: Match) -> None:
+        ball.start_hammer(
+            angular_speed=self.angular_speed,
+            inner_radius=self.inner_radius,
+            outer_radius=self.outer_radius,
+            head_radius=self.head_radius,
+            damage_per_speed_sq=self.damage_per_speed_sq,
+        )
 
 
 @dataclass(frozen=True)

@@ -12,7 +12,7 @@ from pygame.math import Vector2
 
 from ..core.arena import Arena
 from ..core.ball import Ball
-from ..characters import Character, LaserSkill, WebSkill
+from ..characters import Character, HammerSkill, LaserSkill, WebSkill
 from ..config.settings import (
     BAR_FILL_MUTE,
     BAR_TEXT,
@@ -28,6 +28,9 @@ from ..config.settings import (
     COLOR_BEAM_GLOW,
     COLOR_BLADE,
     COLOR_BLADE_EDGE,
+    COLOR_HAMMER_HEAD,
+    COLOR_HAMMER_HEAD_EDGE,
+    COLOR_HAMMER_SHAFT,
     COLOR_HOOK,
     COLOR_HOOK_ROPE,
     COLOR_LASER_NODE,
@@ -57,6 +60,9 @@ from ..config.settings import (
     FONT_SMALL,
     FONT_TITLE,
     FPS,
+    HAMMER_HEAD_EDGE_WIDTH,
+    HAMMER_SHAFT_WIDTH,
+    HAMMER_SPEED_REFERENCE,
     HOOK_RADIUS,
     LASER_NODE_RADIUS,
     MAX_FRAME_TIME,
@@ -313,6 +319,8 @@ class Game:
         # 看着像飘在旁边的另一件东西
         for ball in self.match.balls.values():
             self.draw_blade(ball, offset)
+        for ball in self.match.balls.values():
+            self.draw_hammer(ball, offset)
         self.match.effects.draw(self.screen, offset)
         self.draw_latch_label(offset)
 
@@ -428,6 +436,25 @@ class Game:
         pygame.draw.line(self.screen, COLOR_BLADE, start, end, BLADE_WIDTH)
         pygame.draw.line(self.screen, COLOR_BLADE_EDGE, start, end, BLADE_EDGE_WIDTH)
         pygame.draw.circle(self.screen, COLOR_BLADE, start, BLADE_HUB_RADIUS)
+
+    def draw_hammer(self, ball: Ball, offset) -> None:
+        """画绕身锤：一根柄 + 柄末端那个锤头。
+
+        锤头按**判定用的那个半径**画，不另给一个视觉尺寸——玩家看到的圆就是
+        真正会砸到人的范围，这种"画的就是真的"比好看更要紧。
+        """
+        hammer = ball.hammer
+        if hammer is None:
+            return
+        start, end = hammer.shaft(ball.position)
+        start = (round(start.x + offset.x), round(start.y + offset.y))
+        center = (round(end.x + offset.x), round(end.y + offset.y))
+        pygame.draw.line(self.screen, COLOR_HAMMER_SHAFT, start, center,
+                         HAMMER_SHAFT_WIDTH)
+        pygame.draw.circle(self.screen, COLOR_HAMMER_HEAD, center,
+                           round(hammer.head_radius))
+        pygame.draw.circle(self.screen, COLOR_HAMMER_HEAD_EDGE, center,
+                           round(hammer.head_radius), HAMMER_HEAD_EDGE_WIDTH)
 
     def draw_thrust_trail(self, ball: Ball, offset) -> None:
         """画穿刺的拖尾：从球心**逆着**冲刺方向拖出去的一条尾巴。
@@ -599,6 +626,8 @@ class Game:
             return self.laser_display(ball, skill)
         if isinstance(skill, WebSkill):
             return self.web_display(ball)
+        if isinstance(skill, HammerSkill):
+            return self.hammer_display(ball)
 
         if ball.skill_active:
             hook = ball.hook
@@ -670,6 +699,31 @@ class Game:
         if anchors == 0:
             return ("结网", 0.0, COLOR_WEB)
         return (f"蛛丝 {anchors} 根", min(1.0, anchors / 8.0), COLOR_WEB)
+
+    def hammer_display(self, ball: Ball) -> tuple[str, float, tuple[int, int, int]]:
+        """巨锤的技能条。
+
+        和激光、蛛丝一样是被动，没有冷却也没有生效时长，所以条上画不了"还要
+        等多久"。但它俩画的是**攒了多少**（线数、丝数，会一直涨），锤子没有
+        这种东西可攒——它每一锤都是完整的。
+
+        所以这里画的是**锤头现在有多快**。这不是凑数的：伤害是锤头与敌人的
+        相对速度平方，速度每翻一倍伤害翻四倍，而锤头速度＝球速＋角速度×半径
+        （见 Hammer.head_velocity），是个一直在变的数。玩家看着这个数就能知道
+        自己现在这一锤有多重——跟加速球在待发时把当前移速报出来是同一个用意
+        （那边是"攒到多快了"，这边是"现在有多重"）。
+
+        前提是技能一直挂着；真挂不上（不该发生）就退回一个空条，别让整帧崩掉。
+        """
+        hammer = ball.hammer
+        if hammer is None:
+            return ("巨锤", 0.0, COLOR_HAMMER_HEAD)
+        speed = hammer.head_velocity(ball.effective_velocity).length()
+        return (
+            f"巨锤 |v|{speed:.0f}",
+            min(1.0, speed / HAMMER_SPEED_REFERENCE),
+            COLOR_HAMMER_HEAD,
+        )
 
     def blit_centered(self, text: str, font: pygame.font.Font,
                       rect: pygame.Rect) -> None:

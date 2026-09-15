@@ -15,6 +15,7 @@ from pygame.math import Vector2
 
 from ..states.blade import Blade
 from ..characters import Character
+from ..states.hammer import Hammer
 from ..states.hook import Hook
 from ..states.laser import Beam, LaserField
 from ..states.thrust import Thrust
@@ -100,6 +101,10 @@ class Ball:
     # 绕着自己转的那把刀（武士的常驻被动）。同样是"我身上挂着什么"的账本，
     # 不是技能生效的标记：它没有冷却也没有生效时长，出生起就在转
     blade: Blade | None = None
+    # 绕着自己抡的那把锤子（大锤的被动）。和 blade 同类：账本，不是"技能生效中"。
+    # 和刀分开两个字段而不是合成一个"绕身武器"，是因为命中之后干的事完全不同
+    # （刀蹭血、锤子打飞），合成一个就得在里面到处判是哪种
+    hammer: Hammer | None = None
     # 正在冲的那一下穿刺。这个**是**"技能生效中"的标记（和 hook 同类）：
     # 冲刺的这几帧球不按自己的动量走，位置由 Match.update_thrusts 摆
     thrust: Thrust | None = None
@@ -354,6 +359,23 @@ class Ball:
             inner_radius=inner_radius,
             outer_radius=outer_radius,
             damage=damage,
+        )
+
+    def start_hammer(self, angular_speed: float, inner_radius: float,
+                     outer_radius: float, head_radius: float,
+                     damage_per_speed_sq: float) -> None:
+        """挂上一把绕身锤，从当前朝向那个角度开始抡。
+
+        起始角度和刀一样取 heading 而不是写死 0：同一局里两个大锤不该像同步
+        的机械。锤头半径是**判定**用的（见 Hammer.hits），不是画多大。
+        """
+        self.hammer = Hammer(
+            angle=math.atan2(self.heading.y, self.heading.x),
+            angular_speed=angular_speed,
+            inner_radius=inner_radius,
+            outer_radius=outer_radius,
+            head_radius=head_radius,
+            damage_per_speed_sq=damage_per_speed_sq,
         )
 
     def start_thrust(self, match, speed: float, distance: float,

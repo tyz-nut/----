@@ -110,8 +110,8 @@ class Match:
             ball.lasers = None
             ball.webs = None
             ball.thrust = None
-            # 刀不在这里清——它是常驻被动，跟血量一样属于"球生来就有的东西"，
-            # 由 on_spawn 在造球的时候挂上。重开时球是新建的，刀自然是新的
+            # 刀和锤不在这里清——它们是常驻被动，跟血量一样属于"球生来就有的
+            # 东西"，由 on_spawn 在造球的时候挂上。重开时球是新建的，自然是新的
         self.effects.clear()
 
     def _others(self, player: int) -> list[Ball]:
@@ -122,9 +122,9 @@ class Match:
             character.radius, others, gap=BALL_SPAWN_MIN_GAP
         )
         ball = Ball.spawn(player, character, position)
-        # 常驻被动在这里挂上（绕身刀）。放在造好之后而不是 Ball.spawn 里，
-        # 是因为它要读球的朝向——刀从哪个角度开始转，得等朝向定下来才知道
-        character.attach_passive(ball, self)
+        # 常驻的东西在这里挂上（绕身刀、巨锤）。放在造好之后而不是 Ball.spawn 里，
+        # 是因为它们要读球的朝向——刀和锤从哪个角度开始转，得等朝向定下来才知道
+        character.attach_passives(ball, self)
         return ball
 
     # ---------------- 推进 ----------------
@@ -149,6 +149,7 @@ class Match:
         # 人也照样会被线打到——线是画在墙上的，跟谁在动没关系
         self.apply_lasers(dt)
         self.apply_blades(dt)
+        self.apply_hammers(dt)
         self.apply_webs(dt)
         if self.finished:
             return
@@ -440,16 +441,68 @@ class Match:
                                     first_takes=0.0, second_takes=blade.damage)
         self.judge()
 
+    # ---------------- 巨锤 ----------------
+    def apply_hammers(self, dt: float) -> None:
+        """结算大锤：抡一步，锤头砸到的敌人挨一锤，**每抡一圈最多一次**。
+
+        和刀、激光、光环同一批：都是"场上的东西每帧对球做什么"。放在吸住/钩锁
+        的提前返回之前，所以被吸住、被拖着的人也照样会挨锤——锤子是长在大锤
+        身上的，跟谁在动没关系。
+
+        这一锤比刀多两件事，都在 Hammer.impact 里算：
+
+        - **打飞**：对方的速度整个重写成"撞上一面以锤头速度移动的无限质量墙"
+          的结果（v' = 2u - v）。不是加一股冲量，是直接换速度——所以迎面冲过来
+          的敌人会被弹得比站着不动的更远。
+        - **伤害按相对速度平方**：对方自己在往锤子上撞，那一下就比站着挨打重。
+
+        **霸体的人打不飞，但照样掉血**：霸体顶替的是"被推动"，不是"被碰上"，
+        和渔夫那条"霸体只顶替被推动、伤害照常两边各算各的"是同一条原则。谁是
+        霸体统一问 has_super_armor——**是它，不是 ball.frozen**：光看 frozen
+        只会挡住甩钩锁的渔夫，被吸住的那一对照样会被锤飞，而吸住期间两球的速度
+        本来就由连体位移接管，那一锤等于白写。打不飞的人会一直待在锤子的道上，
+        全靠每圈一次那张名单兜着。
+
+        自己的锤子不砸自己，和刀同理。
+        """
+        for owner in self.balls.values():
+            hammer = owner.hammer
+            if hammer is None or not owner.alive:
+                continue
+            hammer.advance(dt)
+            for target in self.balls.values():
+                if target is owner or not target.alive:
+                    continue
+                if not hammer.hits(owner.position, target.position, target.radius):
+                    continue
+                # 抡过去的这一圈已经砸过它了——锤头压在敌人身上是每帧都"挨着"的，
+                # 少了这一问，一秒就是 60 下
+                if not hammer.consume(target.player):
+                    continue
+                launched, damage = hammer.impact(
+                    owner.effective_velocity, target.effective_velocity
+                )
+                if not self.has_super_armor(target):
+                    target.set_effective_velocity(launched)
+                target.take_damage(damage)
+                self.effects.impact(owner, target,
+                                    first_takes=0.0, second_takes=damage)
+        self.judge()
+
     # ---------------- 黑夜降临 ----------------
-    def start_darkness(self, total: float) -> None:
-        """拉下一次黑夜。已经在黑着就不再拉——同时只有一场。
+    def start_darkness(self, total: float, caster: int) -> None:
+        """拉下一次黑夜，记下是谁放的。已经在黑着就不再拉——同时只有一场。
 
         这不是为了省事：两个死灵法师的技能是同时冷却好的（都是开局就没冷却），
         不挡一下的话两场黑夜会一前一后各换一次位，等于什么都没换。挡掉第二场，
         换位就只发生一次，两边看到的都是对方的场面。
+
+        caster 是"从谁的角度看这次换不换"：换位是个翻盘手段，只有落后的一方放
+        才生效（见 nightfall_swap）。两个死灵法师对打时，落后的那位放的黑夜
+        会把两人换个个儿，领先的那位放了等于没放。
         """
         if self.darkness is None:
-            self.darkness = Darkness.for_duration(total)
+            self.darkness = Darkness.for_duration(total, caster)
 
     def update_darkness(self, dt: float) -> None:
         """推进黑屏：黑到底的那一瞬换位，淡完就收工。"""
@@ -460,17 +513,25 @@ class Match:
         if not darkness.swapped and darkness.blacked_out:
             darkness.swapped = True
             # 已经分出胜负就不再换位：对面可能已经死了，把 0 血换过来会连带
-            # 把赢家也拖成 0，一场明明打赢了的对局变成平局
-            if all(ball.alive for ball in self.balls.values()):
-                self.nightfall_swap()
+            # 把赢家也拖成 0，一场明明打赢了的对局变成平局。
+            # 不足两颗球也没什么可换的（技能是和选人绑的，正常走不到这儿）
+            if len(self.balls) >= 2 and all(
+                ball.alive for ball in self.balls.values()
+            ):
+                self.nightfall_swap(darkness.caster)
         if darkness.finished:
             self.darkness = None
 
-    def nightfall_swap(self) -> None:
+    def nightfall_swap(self, caster: int) -> None:
         """黑夜的正题：双方**互换位置与血量**，动量和其他一切都留在原地。
 
-        血量没有例外，**永远换**，而且换的是百分比（两个角色的 max_hp 不保证
-        一样大，直接对调数值会爆表，见 Ball.hp_ratio）。
+        但**换不换要看放技能的人落后没有**：放的人血量百分比不低于对手时，
+        这一场什么都不换（黑屏照播，玩家能看出技能放出来了、只是没生效）。
+        所以这不是一个"每冷却好就白拿一次"的位移技，是一个**翻盘**手段——
+        残血的时候放才有意义，健康的时候放等于浪费一次冷却。
+
+        血量换的是百分比（两个角色的 max_hp 不保证一样大，直接对调数值会爆表，
+        见 Ball.hp_ratio）。
 
         位置要挑人换：位置正在被"摆"的一方动不了，硬换等于把它从控制里拽出来。
         用户定下的规则是三种情况不换：
@@ -484,8 +545,15 @@ class Match:
         而且打没打中是每帧实时判距离的（见 check_thrust_hit），换完接着冲就是。
         """
         first, second = (self.balls[player] for player in sorted(self.balls))
+        mine = self.balls[caster]
+        theirs = second if mine is first else first
 
-        if not (self.position_held(first) or self.position_held(second)):
+        # 放的人没落后就什么都不换：黑屏已经黑过了，但场面原样不动。
+        # 平手也算"没落后"——不换，免得两边同时残血时互相刷
+        if mine.hp_ratio >= theirs.hp_ratio:
+            return
+
+        if not (self.has_super_armor(first) or self.has_super_armor(second)):
             first.position, second.position = (
                 Vector2(second.position), Vector2(first.position)
             )
@@ -494,10 +562,23 @@ class Match:
         first.hp = second_ratio * first.character.max_hp
         second.hp = first_ratio * second.character.max_hp
 
-    def position_held(self, ball: Ball) -> bool:
-        """这颗球的位置是不是正在被别人摆（而不是按自己的动量在走）。
+    def has_super_armor(self, ball: Ball) -> bool:
+        """这颗球现在是不是**霸体**：位置不由自己说了算。
 
-        三种球：定住不动的、被折线拖着的、粘成一团飞的。见 nightfall_swap。
+        三种球：甩着钩锁定住不动的、被钩锁的折线拖着的、被吸住粘成一团飞的
+        （吸住是连体位移，两球当一团走，方向已经不由其中任何一方决定）。穿刺
+        不算——那只是这颗球自己沿一个方向在跑，随时能停，位置还是自己的。
+
+        霸体的定义**就这一处**，两个地方问它，问的是同一件事的两面：
+
+        - 黑夜降临：位置被摆着的人不能硬挪（会把它从控制里拽出来，钩索断在
+          半空），所以那一对只换血不换位。
+        - 巨锤：推不动的人打不飞，但**照样掉血**——霸体顶替的是"被推动"，
+          不是"被碰上"。跟渔夫那条"霸体只顶替被推动、伤害照常两边各算各的"
+          是同一条原则。
+
+        所以别把它当成"夜降临专用"的判据：以后再有"推不动/挪不动"的场合，
+        该问的还是这里，不是 ball.frozen（那个只认钩锁，漏掉被吸住的人）。
         """
         if ball.frozen:
             return True

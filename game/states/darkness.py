@@ -28,11 +28,12 @@ class Darkness:
     rise: float          # 渐暗用几秒
     hold: float          # 全黑停几秒
     fall: float          # 渐亮用几秒
+    caster: int = 0      # 谁放的这一场。换位要不要发生是"从放的人的角度"看的
     elapsed: float = 0.0
     swapped: bool = False   # 这一下换过位没有（换位只在黑到底的那一刻做一次）
 
     @classmethod
-    def for_duration(cls, total: float) -> "Darkness":
+    def for_duration(cls, total: float, caster: int) -> "Darkness":
         """按整段时长切出三段。
 
         比例来自 config，加起来是 1，所以三段之和严格等于 total——技能的倒计时
@@ -47,6 +48,7 @@ class Darkness:
             rise=total * DARKNESS_RISE_RATIO,
             hold=total * DARKNESS_HOLD_RATIO,
             fall=total * DARKNESS_FALL_RATIO,
+            caster=caster,
         )
 
     @property

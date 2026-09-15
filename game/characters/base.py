@@ -62,13 +62,20 @@ class Character:
     skill: Skill
     passive: Skill | None = None   # 常驻被动，不占技能条。没有就是 None
 
-    def attach_passive(self, ball: Ball, match) -> None:
-        """造球的时候把常驻被动挂上去。没有被动就什么都不做。
+    def attach_passives(self, ball: Ball, match) -> None:
+        """造球的时候把生来就有的东西挂上去。两栏都问一遍，没有的什么都不做。
 
         和 skill 的区别：skill 是"冷却好了放一次"的主动技能，由 Match 每隔
         一段时间问一次；passive 是生来就有的东西（绕身刀），只在出生这一下
         装好，之后它自己一直在。所以这里不是"放技能"，是"装配件"。
+
+        **两栏都要问**，因为常驻的东西不保证放在 passive 那一栏：武士的绕身刀
+        在 passive（它还有个主动的穿刺占着 skill），而激光、蜘蛛、大锤那种
+        "整个角色就一个被动、没有主动技能"的，被动是直接填在 skill 上的。
+        只问 passive 的话，大锤的锤子永远挂不上去。on_spawn 默认什么都不做，
+        所以主动技能被问一句也没有副作用。
         """
+        self.skill.on_spawn(ball, match)
         if self.passive is not None:
             self.passive.on_spawn(ball, match)
 

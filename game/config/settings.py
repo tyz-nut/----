@@ -151,6 +151,18 @@ DARKNESS_HOLD_RATIO = 0.20
 DARKNESS_FALL_RATIO = 0.45
 COLOR_NIGHT = (0, 0, 0)                # 黑屏的颜色。纯黑，压到全黑时战场完全看不见
 
+COLOR_HAMMER_SHAFT = (176, 132, 92)    # 大锤的柄。木色，和场上所有"光"类的东西
+                                       # （激光的红、刀的冷白、丝的灰白）分开：
+                                       # 它不是能量，是一根木头杆子
+COLOR_HAMMER_HEAD = (196, 204, 220)    # 锤头。冷铁色，比柄亮、比刀暗
+COLOR_HAMMER_HEAD_EDGE = (255, 255, 255)  # 锤头上那一条高光
+HAMMER_SHAFT_WIDTH = 5                 # 柄宽（像素）。比刀粗——它是个重东西
+HAMMER_HEAD_EDGE_WIDTH = 2             # 高光宽度
+HAMMER_SPEED_REFERENCE = 900.0         # 技能条满格的参考锤头速度（像素/秒）。
+                                       # 只是观感上的刻度，不影响任何判定：
+                                       # 伤害是相对速度的平方，这个数是给玩家看
+                                       # "现在这一锤有多重"的
+
 COLOR_WEB = (216, 224, 236)            # 蛛丝。偏冷的灰白，和激光的红、刀的冷白都不同：
                                        # 它不是光，是一根绷着的线，所以不画光晕
 COLOR_WEB_ANCHOR = (255, 255, 255)     # 钉在墙上的那个锚点

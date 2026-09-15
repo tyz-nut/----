@@ -90,7 +90,7 @@
 
 - 武士是**唯一有两个技能的角色**：一个常驻被动（绕身刀，填在 passive 那一栏）、
   一个主动（穿刺，填在 skill 那一栏）。被动不占技能条——角色卡和技能条都只认
-  skill，passive 是"生来就有"的配件，由 Character.attach_passive 在造球时装上，
+  skill，passive 是"生来就有"的配件，由 Character.attach_passives 在造球时装上，
   之后它自己一直在，没有冷却也不会被"放"。
 
   绕身刀的每圈伤害：刀是一个从球心往外伸的线段（inner_radius → outer_radius），
@@ -128,6 +128,11 @@
   各走各的（见 Match.nightfall_swap）。所以它是"先被打残、再换过来"，一个
   稳定的翻盘手段，而不是一个输出技能。
 
+  而且它**只在放的人血量百分比低于对手时才真的换**：不落后就什么都不换，
+  黑屏照播（纯演出）。所以它是一张专门留给残血的牌，健康的时候放等于白费一次
+  冷却；平手也不换。这是"落后"两个字唯一落地的地方，改 nightfall_swap 时
+  别只盯着位置那一坨。
+
   换的是**血量百分比**，不是血量数字：按比例换（各换成对方的 hp_ratio × 自己的
   max_hp）。两个角色 max_hp 不一样时，直接换数字会让一方凭空多出或少掉一截血。
 
@@ -140,12 +145,42 @@
   实际隔的是 cooldown + duration。整段黑屏多长是 duration，三段（渐暗 / 全黑 /
   渐亮）各占多少是 config/settings.py 里的三个 ratio，加起来必须是 1——换位卡
   在渐暗走完的那一瞬，rise 太短会看到球当场挪窝，太长又显得拖。
+
+- 大锤的锤子和武士那把刀是**同一套几何**（绕着自己转、每圈最多命中一次），
+  差别全在命中之后：刀是蹭一次血，锤子是**把对方整个速度重写**——概念上是
+  对方撞上了一面**正在移动的无限质量的墙**，完全弹性。推到公式是
+  v' = 2u − v（u 是锤头速度），推导和"为什么它不守恒动量"写在
+  game/states/hammer.py 的开头。
+
+  这是全场唯一一个**直接改对方速度**的东西，所以它和别的输出不是一回事：
+  别的角色是"打得疼"，大锤是"打得远"。挨一锤的人飞出去撞墙那一下还会按
+  撞墙的规矩再吃一次（速度越快越疼），这才是这个角色真正的输出来源。
+
+  u 是**锤头**的速度，不是大锤本人：锤头一边跟着球平移，一边绕着球转，所以
+
+      u = 球的实际速度 + 角速度 × outer_radius（切向）
+
+  于是 angular_speed、outer_radius、以及大锤自己飞多快，三样都进 u，而伤害
+  又是相对速度的**平方**——这三样全是双重收益。特别是 outer_radius：它同时
+  决定够不够得着、锤头有多快、把人打飞多远，是这一套里最敏感的一个数。
+
+  打击判定只认**锤头**不认柄（锤头圆心距对方球心 ≤ head_radius + 对方半径），
+  所以贴着球边擦过去的敌人不算挨锤。柄是握的地方，砸人的是头。
+
+  挨锤的人里**霸体那几种打不飞，但照常掉血**（霸体顶替的是"被推动"，不是
+  "被碰上"，和渔夫那条同源）。它们会一直待在锤子的道上，全靠 hammer_ 那个
+  "每圈一次"的名单兜着——不封顶的话一秒 60 锤。
+
+  速度没有上限，所以这一锤**有可能把球甩得比 MAX_FRAME_TIME 那条安全线还快**
+  （config/settings.py 里那段 556px 的推导）。真甩出去了就是穿透墙面飞出场外，
+  那一条只影响"某局莫名其妙打了很久"时的观感，先记在这儿。
 """
 
 from ..characters import (
     BatSwarmSkill,
     BladeSkill,
     BoostSkill,
+    HammerSkill,
     HookSkill,
     LaserSkill,
     NightfallSkill,
@@ -153,6 +188,7 @@ from ..characters import (
     WebSkill,
 )
 from ..characters.fisher import Fisher
+from ..characters.hammer import Hammer
 from ..characters.laser import Laser
 from ..characters.necromancer import Necromancer
 from ..characters.normal import NormalBall
@@ -324,5 +360,40 @@ NECROMANCER = Necromancer(
     missing_hp_damage_ratio=0.35,
 )
 
+# ============================================================
+# 大锤 —— 碰撞效果无，一把锤子绕身抡，砸中就把人打飞
+# ============================================================
+HAMMER = Hammer(
+    id="hammer",
+    name="大锤",
+    radius=22,
+    max_hp=500,
+    description="绕身巨锤 · 一击打飞",
+    # 被动技能填在 skill 这一栏（和激光、蜘蛛一样）：它整个角色就这一个能力，
+    # 没有主动技能。装锤子走 on_spawn，由 Character.attach_passives 在造球时
+    # 两栏一起问（见 base.py）
+    skill=HammerSkill(
+        name="巨锤",
+        # 被动技能用不到这个数（HammerSkill.ready 恒为 False，永远不会被"放"），
+        # 但 Skill 基类要求有；填 0 是最不容易误读的
+        cooldown=0.0,
+        angular_speed=3.2,         # 角速度（弧度/秒）。2π/3.2 ≈ 2 秒抡一圈，
+                                   # 也就是每个敌人每 2 秒最多挨一锤
+        inner_radius=20.0,         # 柄的内端离球心多远（贴着球面，略小于半径 22）
+        outer_radius=72.0,         # 柄的外端，也就是锤头中心离球心多远。
+                                   # 这个数同时决定三件事：够不够得着、锤头有
+                                   # 多快（ω × 它）、以及被打飞的人飞多远
+        head_radius=16.0,          # 锤头多大。**判定用的是它**，不是球半径：
+                                   # 贴着球边擦过去的敌人不算挨锤，锤头扫到才算
+        damage_per_speed_sq=0.0006,  # 伤害 = 相对速度² × 这个系数。注意是**相对**
+                                     # 速度（锤头速度 − 对方速度），对方自己迎面撞
+                                     # 上来会更疼
+    ),
+    # 没有撞击伤害这一项：和渔夫、激光、武士、蜘蛛一样走基类默认的碰撞效果——
+    # 正常弹开、不掉血。输出全在锤子上，跟撞人没关系
+)
+
 # 顺序即右栏角色卡的排列顺序
-CHARACTERS: tuple = (NORMAL, VAMPIRE, FISHER, LASER, SAMURAI, SPIDER, NECROMANCER)
+CHARACTERS: tuple = (
+    NORMAL, VAMPIRE, FISHER, LASER, SAMURAI, SPIDER, NECROMANCER, HAMMER,
+)

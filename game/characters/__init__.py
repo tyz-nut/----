@@ -8,6 +8,7 @@ game/config/roster.py —— 注册表也在那边，所以这个包不 import �
 
 from .base import Character, CollisionOutcome
 from .fisher import Fisher
+from .hammer import Hammer
 from .laser import Laser
 from .necromancer import Necromancer
 from .normal import NormalBall
@@ -16,6 +17,7 @@ from .skills import (
     BatSwarmSkill,
     BladeSkill,
     BoostSkill,
+    HammerSkill,
     HookSkill,
     LaserSkill,
     NightfallSkill,
@@ -38,6 +40,7 @@ __all__ = [
     "ThrustSkill",
     "WebSkill",
     "NightfallSkill",
+    "HammerSkill",
     "NormalBall",
     "Vampire",
     "Fisher",
@@ -45,4 +48,5 @@ __all__ = [
     "Samurai",
     "Spider",
     "Necromancer",
+    "Hammer",
 ]
