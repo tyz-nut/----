@@ -31,6 +31,8 @@ from ..config.settings import (
     PLAYER_LABEL_WIDTH,
     RIGHT_PANEL_WIDTH,
     SKILL_BAR_WIDTH,
+    SPEED_SLIDER_GAP,
+    SPEED_SLIDER_HEIGHT,
     STATUS_HEIGHT,
 )
 
@@ -45,6 +47,7 @@ class Layout:
     bottom_bar: pygame.Rect
     arena: pygame.Rect
     action_buttons: list[pygame.Rect]
+    speed_slider: pygame.Rect
     player_buttons: list[pygame.Rect]
     character_cards: list[pygame.Rect]
     hp_bars: list[pygame.Rect]
@@ -91,6 +94,13 @@ def build_layout(window_size: tuple[int, int], character_count: int) -> Layout:
     for index in range(4):
         y = buttons_top + index * (ACTION_BUTTON_HEIGHT + ACTION_BUTTON_GAP)
         action_buttons.append(pygame.Rect(inner_left, y, inner_width, ACTION_BUTTON_HEIGHT))
+
+    # 游戏速度滑块紧跟在四个按钮下面。它是左栏唯一一个"不属于某一局"的控件
+    # ——整局对局都有效，所以摆在按钮区之外、快捷键说明之上
+    slider_top = action_buttons[-1].bottom + SPEED_SLIDER_GAP
+    speed_slider = pygame.Rect(
+        inner_left, slider_top, inner_width, SPEED_SLIDER_HEIGHT
+    )
 
     # --- 右栏：标题 + 角色卡（按 CARD_COLUMNS 列排成网格）---
     panel_title_pos = (right_panel.left + PANEL_PADDING, right_panel.top + PANEL_PADDING)
@@ -139,6 +149,7 @@ def build_layout(window_size: tuple[int, int], character_count: int) -> Layout:
         bottom_bar=bottom_bar,
         arena=arena,
         action_buttons=action_buttons,
+        speed_slider=speed_slider,
         player_buttons=player_buttons,
         character_cards=character_cards,
         hp_bars=hp_bars,

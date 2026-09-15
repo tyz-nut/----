@@ -15,17 +15,21 @@ from pygame.math import Vector2
 
 from .arena import Arena
 from .ball import Ball
+from .timescale import TimeScale
 from ..characters import Character, CollisionOutcome
 from ..fx.effects import Effects
+from ..states.blink import BlinkStrike
 from ..states.darkness import Darkness
 from ..states.hook import Hook, point_from_end, polyline_length
 from ..config.settings import (
     BALL_SPAWN_MIN_GAP,
+    BLINK_SWING_SPEED,
     COLOR_HOOK,
     HOOK_RELEASE_SPEED,
     LATCH_RELEASE_SPEED,
     PLAYER_NAMES,
     SEPARATION_EPSILON,
+    TIME_SCALE_DEFAULT,
 )
 
 
@@ -72,6 +76,8 @@ class Match:
         # 它盖的是整块战场，顺带把双方的位置和血量对调（见 update_darkness）。
         # 同时只有一个：两个死灵法师同时开，不该换两次把场面换回去
         self.darkness: Darkness | None = None
+        # 这一局的时间倍速。base 由左栏滑块拧，技能压的系数每帧申报一次
+        self.time_scale = TimeScale(TIME_SCALE_DEFAULT)
         self.finished = False
         self.winner: int | None = None     # finished=True 且 winner=None 表示平局
 
@@ -110,9 +116,42 @@ class Match:
             ball.lasers = None
             ball.webs = None
             ball.thrust = None
+            # 闪现突袭是"技能生效中"的标记：留着它，重开之后刺客会带着一个
+            # 指向上一局那个玩家的挥砍状态复活，而那个序号可能已经换人了
+            ball.blink = None
             # 刀和锤不在这里清——它们是常驻被动，跟血量一样属于"球生来就有的
             # 东西"，由 on_spawn 在造球的时候挂上。重开时球是新建的，自然是新的
         self.effects.clear()
+
+    # ---------------- 时间 ----------------
+    def begin_frame(self) -> None:
+        """每帧开头重收一次"谁要让时间/画面变样"的申报。
+
+        和 Ball.speed_scale 是同一个套路：每帧从零开始，谁要谁申报。
+        申报式的代价就是"忘了申报等于解除"，所以这个清空必须在最前面。
+
+        新加一个"放慢时间"的技能，就在这里加一句；它压多少由技能自己带
+        （见 core/timescale.py 里对"为什么不做成带时长的减速"的说明）。
+        """
+        self.time_scale.reset()
+        self.effects.reset_screen()
+
+        for ball in self.balls.values():
+            blink = ball.blink
+            if blink is not None and blink.flashing:
+                self.time_scale.push(f"blink:{ball.player}", blink.slow_factor)
+                self.effects.set_vignette(blink.flash_ratio)
+
+        darkness = self.darkness
+        if darkness is not None and darkness.slowing:
+            self.time_scale.push("nightfall", darkness.slow_factor)
+
+    def opponent(self, ball: Ball) -> Ball | None:
+        """另一颗球。场上只剩自己时是 None（正常对局走不到，但技能别因此炸掉）。"""
+        for other in self.balls.values():
+            if other is not ball:
+                return other
+        return None
 
     def _others(self, player: int) -> list[Ball]:
         return [ball for index, ball in self.balls.items() if index != player]
@@ -129,6 +168,11 @@ class Match:
 
     # ---------------- 推进 ----------------
     def update(self, dt: float) -> None:
+        # 本帧谁要让时间慢下来，先收一遍申报，**必须在算 dt 之前**。
+        # 它同时清掉上一帧的画面状态（暗角），所以放在最前面
+        self.begin_frame()
+        dt *= self.time_scale.scale
+
         # 特效先推进，而且放在 finished 判断**之前**：分出胜负的那一下也得把
         # 圈炸完、把数字飘完，不能打死人的瞬间画面就定住了
         self.effects.update(dt)
@@ -151,6 +195,9 @@ class Match:
         self.apply_blades(dt)
         self.apply_hammers(dt)
         self.apply_webs(dt)
+        # 挥砍和上面那批一样：不看谁在动。刺客已经贴上去了，对方被吸住、被
+        # 钩子拖着也照样砍
+        self.update_blinks(dt)
         if self.finished:
             return
 
@@ -489,8 +536,117 @@ class Match:
                                     first_takes=0.0, second_takes=damage)
         self.judge()
 
+    # ---------------- 闪现突袭 ----------------
+    def start_blink(self, ball: Ball, target: Ball, distance: float,
+                    flash_seconds: float, slow_factor: float,
+                    slash_seconds: float, reach: float,
+                    break_distance: float, damage_per_second: float) -> None:
+        """闪到目标身后一段距离，接过它的动量，开始挥砍。
+
+        "身后"取的是**敌人运动方向的反面**（target.heading），不是"相对刺客的
+        另一侧"。所以它是咬尾巴，不是穿过去：敌人往哪飞，刺客就落在它屁股后头。
+
+        落点用 heading 而不是速度矢量，是因为两球正面对撞后速度可能被清成 0
+        ——那种时候 heading 还留着上一帧的朝向，是唯一还有意义的方向（见
+        Ball.effective_velocity 里对 heading 的说明）。
+
+        闪现是**当场**换位置，不走过场：flash 那一段纯粹是演出（暗角 + 减速），
+        位置在技能放出来这一帧就已经到了。演出比位移长一点是有意的——"闪过去
+        了"这件事得有个能被看见的瞬间。
+
+        还要把位置夹回场内：敌人贴着墙的时候，它屁股后头就是墙外。
+        """
+        behind = target.position - target.heading * distance
+        ball.position.update(behind)
+        self.arena.clamp_inside(ball.position, ball.radius)
+
+        # 接过敌人的动量。之后各飞各的——对方撞墙改向时两人就分开了，这正是
+        # break_distance 那条结束条件的主要来源
+        ball.set_effective_velocity(target.effective_velocity)
+
+        facing = target.position - ball.position
+        if facing.length_squared() > 1e-9:
+            facing = facing.normalize()
+        else:
+            facing = Vector2(target.heading)
+
+        ball.blink = BlinkStrike(
+            target=target.player,
+            facing=facing,
+            slash_remaining=slash_seconds,
+            slash_total=slash_seconds,
+            flash_remaining=flash_seconds,
+            flash_total=flash_seconds,
+            slow_factor=slow_factor,
+            damage_per_second=damage_per_second,
+            reach=reach,
+            break_distance=break_distance,
+        )
+
+    def update_blinks(self, dt: float) -> None:
+        """推进闪现突袭：够得着就一直砍，砍不动了或时间到了就收招。
+
+        和光环、激光、蛛丝同一批：都是"场上的东西每帧对球做什么"。放在吸住/
+        钩锁的提前返回之前，所以被吸住、被拖着的人也照样会被砍——刺客已经贴上
+        去了，跟谁在动没关系。
+
+        掉血走 effects.drain_damage（红字、攒着报），和吸血同一路：都是每帧
+        结算的持续伤害，一帧飘一个数字会糊成一片。
+        """
+        for ball in self.balls.values():
+            strike = ball.blink
+            if strike is None:
+                continue
+
+            strike.swing += dt * BLINK_SWING_SPEED
+            if strike.flash_remaining > 0.0:
+                strike.flash_remaining = max(0.0, strike.flash_remaining - dt)
+
+            target = self.balls.get(strike.target)
+            if target is None or not target.alive or not ball.alive:
+                ball.finish_skill()
+                continue
+
+            # 先判"还够不够得着"，再砍。分开判和拉开判是两回事：分开是收招，
+            # 够不着只是这一帧砍空——站在够得着和分开之间那一小段距离上时，
+            # 刺客还在挥，只是砍不到人
+            if self.blink_broken(ball, target, strike):
+                ball.finish_skill()
+                continue
+
+            strike.slash_remaining = max(0.0, strike.slash_remaining - dt)
+            if self.blink_in_reach(ball, target, strike):
+                dealt = strike.damage_per_second * dt
+                target.take_damage(dealt)
+                self.effects.drain_damage(target.player, target.position, dealt)
+
+            if strike.slash_remaining <= 0.0:
+                ball.finish_skill()
+        self.judge()
+
+    def blink_in_reach(self, ball: Ball, target: Ball, strike: BlinkStrike) -> bool:
+        """敌人还在**面前**、还在够得着的范围里吗。
+
+        "面前"用的是闪现那一刻定死的 facing，不跟着敌人转：所以对方拐到刺客
+        身后之后就砍不到了。这一条加上 reach，就是"持续挥砍面前敌人"里的
+        "面前"两个字落地的地方。
+        """
+        offset = target.position - ball.position
+        if offset.length() > strike.reach:
+            return False
+        return offset.dot(strike.facing) > 0.0
+
+    def blink_broken(self, ball: Ball, target: Ball, strike: BlinkStrike) -> bool:
+        """拉开太远，这一套该收了。
+
+        刺客接过的是敌人**那一刻**的动量，之后两人各飞各的，所以对方一撞墙
+        改向，距离就会越拉越大。这就是"分开一定距离后开始冷却"那条。
+        """
+        return ball.position.distance_to(target.position) > strike.break_distance
+
     # ---------------- 黑夜降临 ----------------
-    def start_darkness(self, total: float, caster: int) -> None:
+    def start_darkness(self, total: float, caster: int,
+                       slow_factor: float = 1.0) -> None:
         """拉下一次黑夜，记下是谁放的。已经在黑着就不再拉——同时只有一场。
 
         这不是为了省事：两个死灵法师的技能是同时冷却好的（都是开局就没冷却），
@@ -500,9 +656,13 @@ class Match:
         caster 是"从谁的角度看这次换不换"：换位是个翻盘手段，只有落后的一方放
         才生效（见 nightfall_swap）。两个死灵法师对打时，落后的那位放的黑夜
         会把两人换个个儿，领先的那位放了等于没放。
+
+        slow_factor 是黑屏期间把游戏速度压到几倍。压的是**渐暗 + 全黑**那一段，
+        渐亮时恢复（见 Darkness.slowing）：变黑是个"要出事"的过程，慢下来是在
+        等那件事发生；变亮是收尾，再拖着慢就没意思了。
         """
         if self.darkness is None:
-            self.darkness = Darkness.for_duration(total, caster)
+            self.darkness = Darkness.for_duration(total, caster, slow_factor)
 
     def update_darkness(self, dt: float) -> None:
         """推进黑屏：黑到底的那一瞬换位，淡完就收工。"""

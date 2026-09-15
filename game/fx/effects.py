@@ -68,6 +68,9 @@ class Effects:
     def __init__(self, font=None) -> None:
         self.camera = Camera()
         self.particles = ParticleSystem(font)
+        # 屏幕边缘压暗的强度，0~1。和粒子、抖动不同，这是**状态**不是事件：
+        # 所以它走"每帧重新申报"，不攒在粒子系统里（见 Match.begin_frame）
+        self.vignette = 0.0
         # 掉血和回血分成两张表。吸血是同时在两个人身上结算的：被吸的一方在掉，
         # 吸人的一方在回。合成一张表的话两边会攒进同一个计数器，数字就串了
         self._damage_over_time: dict[int, _DrainCounter] = {}
@@ -129,6 +132,18 @@ class Effects:
             counter = table[player] = _DrainCounter(color=color, prefix=prefix)
         return counter
 
+    def set_vignette(self, strength: float) -> None:
+        """屏幕边缘压暗到多黑，0~1。谁要压谁申报（规则层每帧重新申报一次）。
+
+        多个来源同时要压时取**最深的那个**，不是相加：相加会在两个技能撞在
+        一起时直接压成全黑，而"更黑"本来也没有意义——强度到 1 就到头了。
+        """
+        self.vignette = max(self.vignette, min(1.0, strength))
+
+    def reset_screen(self) -> None:
+        """清掉上一帧申报的画面状态。每帧开头调，之后由各个来源重新申报。"""
+        self.vignette = 0.0
+
     # ---------------- 推进 ----------------
     def update(self, dt: float) -> None:
         self.camera.update(dt)
@@ -155,6 +170,7 @@ class Effects:
         """重开一局：抖到一半的残留和满屏粒子都不该带到下一局。"""
         self.camera.reset()
         self.particles.clear()
+        self.reset_screen()
         self._damage_over_time.clear()
         self._healing.clear()
 

@@ -34,6 +34,25 @@ STATUS_HEIGHT = 60           # 左栏顶部状态文字占位
 ACTION_BUTTON_HEIGHT = 52
 ACTION_BUTTON_GAP = 14
 
+# ---------------- 左栏游戏速度滑块 ----------------
+# 滑块拧的是 TimeScale.base，技能压的减速**乘**在它上面（见 core/timescale.py）。
+# 所以 0.25 再碰上技能 0.25 就是 0.0625x——极值不用管，这是定下来的叠加方式
+TIME_SCALE_MIN = 0.25
+TIME_SCALE_MAX = 3.0
+TIME_SCALE_DEFAULT = 1.0
+
+SPEED_SLIDER_HEIGHT = 48     # 整条滑块占多高。里面均分成三行：数值 / 滑轨 / 标签
+SPEED_SLIDER_GAP = 18        # 滑块离上方按钮的间距
+SPEED_LABEL_GAP = 14         # 滑块离下方快捷键说明的间距
+SLIDER_TRACK_HEIGHT = 6      # 滑轨粗细
+SLIDER_KNOB_RADIUS = 8       # 滑块圆头半径
+SLIDER_STEPS = 20            # 拖动时的吸附档数。拧到 2.37x 没什么意义
+
+COLOR_SLIDER_TRACK = (40, 46, 60)
+COLOR_SLIDER_FILL = (72, 132, 196)     # 滑块左侧已经拧过去的那一段
+COLOR_SLIDER_KNOB = (214, 222, 238)
+COLOR_SLIDER_KNOB_HOVER = (255, 255, 255)
+
 # ---------------- 右栏角色卡 ----------------
 # 排成 CARD_COLUMNS 列的网格。这几个数是照着"最多放得下多少张"反推的：
 # 面板可用高度 ≈ 632 - 标题 40 - 底部提示 28 = 564，一行占 CARD_HEIGHT + CARD_GAP
@@ -150,6 +169,24 @@ DARKNESS_RISE_RATIO = 0.35
 DARKNESS_HOLD_RATIO = 0.20
 DARKNESS_FALL_RATIO = 0.45
 COLOR_NIGHT = (0, 0, 0)                # 黑屏的颜色。纯黑，压到全黑时战场完全看不见
+
+# 幻影刺客。紫色系，和场上别的东西都不撞：激光红、刀/锤冷白、蛛丝灰白、
+# 穿刺青蓝、吸住品红。它和吸住的品红最近，但那个只在两球之间连一条线
+COLOR_PHANTOM = (186, 138, 255)        # 挥砍的弧光
+COLOR_PHANTOM_CORE = (238, 224, 255)   # 弧光里那道更亮的芯
+PHANTOM_SLASH_STEPS = 10               # 弧用几段折线拼（越多越圆，越费）
+COLOR_PHANTOM_RING = (214, 176, 255)   # 闪现那一下套在身上的那个圈
+BLINK_SWING_SPEED = 9.0                # 挥砍动画每游戏秒转多少弧度。纯演出
+PHANTOM_SLASH_SPREAD = 1.1             # 一刀扫过的半张角（弧度）。约 63°
+PHANTOM_SLASH_WIDTH = 4                # 弧光粗细
+PHANTOM_RING_PADDING = 7               # 闪现那个圈比球面大多少
+
+# 屏幕边缘压暗（暗角）。刺客闪现那一下用；以后别的"大动作"也能用。
+# 做法是先把渐变做小再放大——逐像素铺满 600×600 太慢，64×64 放大后看不出区别
+VIGNETTE_BUILD_SIZE = 64               # 渐变先在这么小的图上算
+VIGNETTE_INNER = 0.30                  # 中心多大一圈完全不受影响（占半宽的比例）
+VIGNETTE_MAX_ALPHA = 240               # 强度 1 时四角压到多黑
+COLOR_VIGNETTE = (0, 0, 0)
 
 COLOR_HAMMER_SHAFT = (176, 132, 92)    # 大锤的柄。木色，和场上所有"光"类的东西
                                        # （激光的红、刀的冷白、丝的灰白）分开：

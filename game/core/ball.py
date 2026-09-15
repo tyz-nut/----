@@ -15,6 +15,7 @@ from pygame.math import Vector2
 
 from ..states.blade import Blade
 from ..characters import Character
+from ..states.blink import BlinkStrike
 from ..states.hammer import Hammer
 from ..states.hook import Hook
 from ..states.laser import Beam, LaserField
@@ -108,6 +109,9 @@ class Ball:
     # 正在冲的那一下穿刺。这个**是**"技能生效中"的标记（和 hook 同类）：
     # 冲刺的这几帧球不按自己的动量走，位置由 Match.update_thrusts 摆
     thrust: Thrust | None = None
+    # 正在进行的闪现突袭（幻影刺客）。和 thrust 同类，**是**"技能生效中"的
+    # 标记：不为空的时候技能不结束、冷却不走
+    blink: BlinkStrike | None = None
     # 自己钉在墙上的那些蛛丝锚点（蜘蛛的被动）。和 lasers 同类，是"我留下了
     # 什么"的账本。每一根的另一头都连着**现在的自己**，所以这里只存墙上那点
     webs: list[WebAnchor] | None = None
@@ -213,8 +217,7 @@ class Ball:
         """
         return self.character.skill.active(self)
 
-    @property
-    def skill_ready(self) -> bool:
+    def skill_ready(self, match) -> bool:
         """能不能放技能。四道关，缺一不可：
 
         - 冷却走完了
@@ -225,12 +228,15 @@ class Ball:
 
         这里**不看**是否已在加速中：加速是永久的、瞬时的，放完就没有"生效中"
         这个阶段，拿它当挡箭牌会让第二次永远放不出来。
+
+        要 match 是为了那些"看场上局势才决定放不放"的技能：幻影刺客的技能是
+        被动等触发的，它要拿整局去预判"我是不是快撞上了"（见 core/predict）。
         """
         return (
             self.cooldown_timer <= 0
             and not self.skill_active
             and not self.silenced
-            and self.character.skill.ready(self)
+            and self.character.skill.ready(self, match)
         )
 
     # ---------------- 推进 ----------------
@@ -275,7 +281,7 @@ class Ball:
           冷却**，等它结束了冷却才从零开始。所以"冷却 15 秒 + 持续 5 秒"的技能
           两轮之间实际隔 20 秒，而条上先黄后蓝、刚好接得上
         """
-        if not self.skill_ready:
+        if not self.skill_ready(match):
             return False
         skill = self.character.skill
         skill.activate(self, match)
@@ -292,9 +298,9 @@ class Ball:
     def finish_skill(self) -> None:
         """技能生效结束：收掉它留下的持续效果，冷却从这一刻开始算。
 
-        清 aura 和 hook 都是无条件的，因为一个球只有一个技能槽——场上不可能存在
-        "这个球带着别人给的圈"的情况。哪天有了第二个能留持续效果的技能，这里要
-        改成按技能各自清理。
+        清 aura / hook / blink 都是无条件的，因为一个球只有一个技能槽——场上
+        不可能存在"这个球带着别人给的圈"的情况。哪天有了第二个能留持续效果的
+        技能，这里要改成按技能各自清理。
 
         按倒计时的技能由 tick() 在倒计时归零时自动调到这里；不按倒计时的
         （钩锁）由 Match 在它该结束的那一刻调。
@@ -303,6 +309,7 @@ class Ball:
         self.skill_active_total = 0.0
         self.aura = None
         self.hook = None
+        self.blink = None
         self.cooldown_timer = self.character.skill.cooldown
 
     # ---------------- 技能留在自己身上的状态 ----------------

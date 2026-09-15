@@ -29,11 +29,13 @@ class Darkness:
     hold: float          # 全黑停几秒
     fall: float          # 渐亮用几秒
     caster: int = 0      # 谁放的这一场。换位要不要发生是"从放的人的角度"看的
+    slow_factor: float = 1.0   # 黑屏期间把游戏速度压到几倍（1 = 不压）
     elapsed: float = 0.0
     swapped: bool = False   # 这一下换过位没有（换位只在黑到底的那一刻做一次）
 
     @classmethod
-    def for_duration(cls, total: float, caster: int) -> "Darkness":
+    def for_duration(cls, total: float, caster: int,
+                     slow_factor: float = 1.0) -> "Darkness":
         """按整段时长切出三段。
 
         比例来自 config，加起来是 1，所以三段之和严格等于 total——技能的倒计时
@@ -49,6 +51,7 @@ class Darkness:
             hold=total * DARKNESS_HOLD_RATIO,
             fall=total * DARKNESS_FALL_RATIO,
             caster=caster,
+            slow_factor=slow_factor,
         )
 
     @property
@@ -63,6 +66,21 @@ class Darkness:
     def blacked_out(self) -> bool:
         """黑到底了没有——换位就卡在这一刻。"""
         return self.elapsed >= self.rise
+
+    @property
+    def slowing(self) -> bool:
+        """现在该不该压时间：**渐暗 + 全黑**压，渐亮时恢复。
+
+        和换位卡在同一根时间轴上，但覆盖的区间不一样：换位只在渐暗走完的那
+        一瞬发生一次，减速是渐暗一开始就压上、一直到全黑结束。所以黑夜的观感
+        是"天慢慢黑下来的时候世界变慢了，天开始亮回来就恢复正常"，那个换位
+        就发生在最慢、最黑的那一下里。
+
+        注意它是**游戏时间**意义上的：减速期间 elapsed 走得也慢，所以渐暗 +
+        全黑这一段在真实时间里会比设定的秒数长。这是要的效果——慢镜头本来就
+        该把这段时间拉长。
+        """
+        return self.elapsed < self.rise + self.hold
 
     @property
     def alpha(self) -> float:

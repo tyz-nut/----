@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING
 
 from pygame.math import Vector2
 
+from ..core.predict import will_be_hit
+
 if TYPE_CHECKING:
     from ..core.ball import Ball
     from ..core.match import Match
@@ -40,8 +42,13 @@ class Skill:
     cooldown: float
     duration: float = 0.0
 
-    def ready(self, ball: Ball) -> bool:
-        """除了冷却好了，还有没有别的条件挡着不让放。默认没有。"""
+    def ready(self, ball: Ball, match: Match) -> bool:
+        """除了冷却好了，还有没有别的条件挡着不让放。默认没有。
+
+        要 match 是为了那些"看场上局势才决定放不放"的技能——幻影刺客的技能
+        就是被动等着触发的，它得拿整局去预判自己是不是快撞上了（见
+        core/predict）。绝大多数技能用不到，忽略即可。
+        """
         return True
 
     def active(self, ball: Ball) -> bool:
@@ -144,7 +151,7 @@ class HookSkill(Skill):
     drain_per_second: float = 30.0   # 收线期间每秒从敌人身上吸走多少血
     reel_gap: float = 8.0            # 拉到身前时两球之间留的空隙（像素）
 
-    def ready(self, ball: Ball) -> bool:
+    def ready(self, ball: Ball, match: Match) -> bool:
         """钩锁只有一条：手上还挂着一条就不能再甩。
 
         冷却时间其实管不住这件事——钩锁可能飞得比冷却还久，光靠冷却的话
@@ -182,7 +189,7 @@ class LaserSkill(Skill):
 
     damage_per_second: float = 25.0    # 压在一条线上每秒掉多少血（多根会叠加）
 
-    def ready(self, ball: Ball) -> bool:
+    def ready(self, ball: Ball, match: Match) -> bool:
         return False
 
     def activate(self, ball: Ball, match: Match) -> None:
@@ -213,7 +220,7 @@ class WebSkill(Skill):
     damage_per_second: float = 20.0   # 压在一根丝上每秒掉多少血（多根会叠加）
     slow_ratio: float = 0.4           # 压在一根丝上减速多少，0.4 就是速度打六折
 
-    def ready(self, ball: Ball) -> bool:
+    def ready(self, ball: Ball, match: Match) -> bool:
         return False
 
     def activate(self, ball: Ball, match: Match) -> None:
@@ -244,12 +251,83 @@ class NightfallSkill(Skill):
 
     换位换什么、不换什么（尤其是霸体和被吸住的时候怎么办），写在
     Match.nightfall_swap 上——那是这一整套里唯一真正需要想清楚的地方。
+
+    **黑屏的时候时间也会变慢**（slow_factor），而且只慢"渐暗 + 全黑"那一段，
+    渐亮就恢复正常——所以那个换位卡在最慢、最黑的那一下里。减速写在这里、
+    由 Darkness 带着走（见 states/darkness.py 的 slowing）。
     """
 
     duration: float = 1.2    # 整段黑屏几秒。三段的比例在 config/settings.py
+    slow_factor: float = 0.35   # 黑屏期间游戏速度压到几倍（1 = 不压）
 
     def activate(self, ball: Ball, match: Match) -> None:
-        match.start_darkness(self.duration, ball.player)
+        match.start_darkness(self.duration, ball.player, self.slow_factor)
+
+
+@dataclass(frozen=True)
+class BlinkStrikeSkill(Skill):
+    """闪现突袭：冷却好了**不马上放**，等着被撞的那一刻闪走。
+
+    这是第一个"条件触发"的主动技能，和别的技能的分水岭在 ready：
+
+    - 别的技能 ready 只管"还有没有别的条件挡着"（钩锁那句问的是"手上还有没有
+      一条没回来"），冷却一到就放。
+    - 这个技能的 ready 就是那个条件本身——它会去**预判**自己接下来一小段会不会
+      撞上敌人或对方留下的东西（球、刀、锤、激光、蛛丝、飞在半路的钩锁），
+      会撞才放。这个判断要读整局，所以 Skill.ready 才多收了一个 match 参数。
+
+    于是"等待触发"这件事不需要任何新机制：cast_ready_skills 本来就在每帧问
+    "能放吗"，让 ready 回答"暂时还不能"就行。玩家看到的观感是"冷却完了但技能
+    没亮起来，等真要被撞了才闪出去"——技能条上那一段就是待发态。
+
+    触发之后（见 Match.start_blink）：
+
+    1. **闪现**到敌人**身后**一段距离（身后 = 敌人运动方向的反面）。位置是当场
+       换好的，不走过场。
+    2. 顺手**接过敌人的动量**——按对方的速度继续往前。所以它不是"闪过去站着"，
+       是"闪到对方屁股后头跟着飞"。
+    3. **持续挥砍**：只要敌人还在面前、还在够得着的范围里就一直砍。
+
+    结束条件有两个，谁先到算谁：挥砍时间走完，或者两人拉开了 break_distance。
+    拉开主要发生在对方撞墙改向的时候——刺客接过的是**那一刻**的动量，之后各飞
+    各的，对方一拐弯两人就分开了。
+
+    这类技能没有 duration（生效多久不由秒数决定），靠覆盖 active() 回答，和
+    钩锁同类。
+    """
+
+    cooldown: float = 12.0
+    react_seconds: float = 0.32      # 往前预判多久。越大越早触发，也越容易误报
+    react_samples: int = 8           # 预判采几个样。见 core/predict.py
+    blink_distance: float = 70.0     # 闪到敌人身后多远
+    flash_seconds: float = 0.14      # 闪现那一下持续多久（暗角 + 减速跟着它走）
+    slow_factor: float = 0.22        # 闪现那一下把游戏速度压到几倍
+    slash_seconds: float = 1.6       # 挥砍最多持续几秒
+    slash_reach: float = 110.0       # 够得着多远才算砍到
+    break_distance: float = 170.0    # 拉开这么远就收招
+    damage_per_second: float = 55.0  # 挥砍每秒砍掉多少血
+
+    def ready(self, ball: Ball, match: Match) -> bool:
+        """冷却好了也先憋着，等预判说自己快撞上了才放。"""
+        return will_be_hit(match, ball, self.react_seconds, self.react_samples)
+
+    def active(self, ball: Ball) -> bool:
+        return ball.blink is not None
+
+    def activate(self, ball: Ball, match: Match) -> None:
+        target = match.opponent(ball)
+        if target is None:
+            return
+        match.start_blink(
+            ball, target,
+            distance=self.blink_distance,
+            flash_seconds=self.flash_seconds,
+            slow_factor=self.slow_factor,
+            slash_seconds=self.slash_seconds,
+            reach=self.slash_reach,
+            break_distance=self.break_distance,
+            damage_per_second=self.damage_per_second,
+        )
 
 
 @dataclass(frozen=True)
@@ -283,7 +361,7 @@ class HammerSkill(Skill):
     head_radius: float = 16.0        # 锤头多大。判定用的是它，不是球半径
     damage_per_speed_sq: float = 0.0006   # 伤害 = 相对速度² × 这个系数
 
-    def ready(self, ball: Ball) -> bool:
+    def ready(self, ball: Ball, match: Match) -> bool:
         return False
 
     def activate(self, ball: Ball, match: Match) -> None:
@@ -317,7 +395,7 @@ class BladeSkill(Skill):
     outer_radius: float = 46.0       # 刀刃外端。两个数一起决定刀有多长
     damage: float = 45.0             # 蹭一下扣多少血
 
-    def ready(self, ball: Ball) -> bool:
+    def ready(self, ball: Ball, match: Match) -> bool:
         return False
 
     def activate(self, ball: Ball, match: Match) -> None:

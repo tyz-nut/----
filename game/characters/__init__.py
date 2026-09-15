@@ -6,6 +6,7 @@ game/config/roster.py —— 注册表也在那边，所以这个包不 import �
 免得绕成循环导入。
 """
 
+from .assassin import PhantomAssassin
 from .base import Character, CollisionOutcome
 from .fisher import Fisher
 from .hammer import Hammer
@@ -16,6 +17,7 @@ from .samurai import Samurai
 from .skills import (
     BatSwarmSkill,
     BladeSkill,
+    BlinkStrikeSkill,
     BoostSkill,
     HammerSkill,
     HookSkill,
@@ -41,6 +43,7 @@ __all__ = [
     "WebSkill",
     "NightfallSkill",
     "HammerSkill",
+    "BlinkStrikeSkill",
     "NormalBall",
     "Vampire",
     "Fisher",
@@ -49,4 +52,5 @@ __all__ = [
     "Spider",
     "Necromancer",
     "Hammer",
+    "PhantomAssassin",
 ]

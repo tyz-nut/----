@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from enum import Enum, auto
 from functools import partial
@@ -12,7 +13,13 @@ from pygame.math import Vector2
 
 from ..core.arena import Arena
 from ..core.ball import Ball
-from ..characters import Character, HammerSkill, LaserSkill, WebSkill
+from ..characters import (
+    BlinkStrikeSkill,
+    Character,
+    HammerSkill,
+    LaserSkill,
+    WebSkill,
+)
 from ..config.settings import (
     BAR_FILL_MUTE,
     BAR_TEXT,
@@ -39,6 +46,9 @@ from ..config.settings import (
     COLOR_PANEL,
     COLOR_PANEL_BORDER,
     COLOR_PANEL_TITLE,
+    COLOR_PHANTOM,
+    COLOR_PHANTOM_CORE,
+    COLOR_PHANTOM_RING,
     COLOR_SKILL_ACTIVE,
     COLOR_SKILL_COOLDOWN,
     COLOR_SKILL_READY,
@@ -48,6 +58,7 @@ from ..config.settings import (
     COLOR_THRUST,
     COLOR_WEB,
     COLOR_WEB_ANCHOR,
+    COLOR_VIGNETTE,
     COLOR_WINNER,
     DAMAGE_NUMBER_FONT,
     DEBUG_VELOCITY_SCALE,
@@ -67,9 +78,19 @@ from ..config.settings import (
     LASER_NODE_RADIUS,
     MAX_FRAME_TIME,
     PANEL_PADDING,
+    PHANTOM_RING_PADDING,
+    PHANTOM_SLASH_SPREAD,
+    PHANTOM_SLASH_STEPS,
+    PHANTOM_SLASH_WIDTH,
     PLAYER_NAMES,
     THRUST_TRAIL_LENGTH,
     THRUST_TRAIL_WIDTH,
+    TIME_SCALE_DEFAULT,
+    TIME_SCALE_MAX,
+    TIME_SCALE_MIN,
+    VIGNETTE_BUILD_SIZE,
+    VIGNETTE_INNER,
+    VIGNETTE_MAX_ALPHA,
     WEB_ANCHOR_RADIUS,
     WEB_WIDTH,
     WINDOW_HEIGHT,
@@ -80,7 +101,7 @@ from ..config.roster import CHARACTERS
 from ..fx.effects import Effects
 from .layout import build_layout
 from ..core.match import Match
-from .widgets import Button, draw_bar
+from .widgets import Button, Slider, draw_bar
 
 
 class State(Enum):
@@ -159,7 +180,46 @@ class Game:
         self.night_surface = pygame.Surface(self.layout.arena.size).convert_alpha()
         self.night_surface.fill(COLOR_NIGHT)
 
+        # 暗角：也是做一次、之后只改 alpha（见 build_vignette / draw_vignette）
+        self.vignette_surface = self.build_vignette()
+
+        # 游戏速度滑块。它拧的是 match.time_scale.base——技能压的减速乘在它上面，
+        # 所以这里改的是"基准速度"，不是"最终速度"
+        self.speed_slider = Slider(
+            self.layout.speed_slider,
+            minimum=TIME_SCALE_MIN,
+            maximum=TIME_SCALE_MAX,
+            value=TIME_SCALE_DEFAULT,
+            label="游戏速度",
+        )
+
         self.build_buttons()
+
+    def build_vignette(self) -> pygame.Surface:
+        """做一张"边缘黑、中间透明"的图，之后每帧只改它的整体透明度。
+
+        逐像素铺满 600×600 太慢，所以先在一张小图上算好渐变再放大——放大后
+        是平滑的，看不出是从 64×64 来的（见 config 里 VIGNETTE_BUILD_SIZE 那段）。
+
+        渐变按**到中心的归一化距离**算，四角正好是 1：中心 VIGNETTE_INNER
+        以内完全不动手，往外线性加深，到角上压到 VIGNETTE_MAX_ALPHA。
+        """
+        size = VIGNETTE_BUILD_SIZE
+        small = pygame.Surface((size, size), pygame.SRCALPHA)
+        inner = VIGNETTE_INNER
+        span = max(1e-6, 1.0 - inner)
+        corner = (2.0 ** 0.5) / 2.0     # 单位方格里四角到中心的距离
+        for y in range(size):
+            ny = (y + 0.5) / size - 0.5
+            for x in range(size):
+                nx = (x + 0.5) / size - 0.5
+                distance = ((nx * nx + ny * ny) ** 0.5) / corner
+                ratio = max(0.0, min(1.0, (distance - inner) / span))
+                small.set_at(
+                    (x, y),
+                    (*COLOR_VIGNETTE, round(ratio * VIGNETTE_MAX_ALPHA)),
+                )
+        return pygame.transform.smoothscale(small, self.layout.arena.size)
 
     # ---------------- 按钮 ----------------
     def build_buttons(self) -> None:
@@ -254,8 +314,21 @@ class Game:
                 self.running = False
             elif event.type == pygame.KEYDOWN:
                 self.handle_key(event.key)
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                self.handle_click(event)
+            elif event.type in (
+                pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION
+            ):
+                self.handle_mouse(event)
+
+    def handle_mouse(self, event: pygame.event.Event) -> None:
+        """鼠标事件先问滑块，再问按钮。
+
+        滑块**吃掉了**才算数（拖着圆头经过别的按钮时不该顺手把它们点亮），
+        所以顺序不能反，而且滑块说没吃才轮到 handle_click。
+        """
+        if self.speed_slider.handle(event):
+            return
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            self.handle_click(event)
 
     def handle_key(self, key: int) -> None:
         """键盘快捷键，和按钮等价。"""
@@ -278,6 +351,10 @@ class Game:
                 return
 
     def update(self, dt: float) -> None:
+        # 滑块的当前值每帧同步给时间倍速。**无条件**写：暂停时拧滑块再继续，
+        # 下一帧就该是新的速度。写的是 base（基准），技能压的系数由 Match
+        # 每帧自己申报，两者相乘（见 core/timescale.py）
+        self.match.time_scale.base = self.speed_slider.value
         if self.state is State.RUNNING:
             self.match.update(dt)
 
@@ -286,6 +363,7 @@ class Game:
         mouse_pos = pygame.mouse.get_pos()
         for button in self.all_buttons():
             button.update_hover(mouse_pos)
+        self.speed_slider.update_hover(mouse_pos)
         self.sync_buttons()
 
         self.screen.fill(COLOR_BG)
@@ -321,8 +399,16 @@ class Game:
             self.draw_blade(ball, offset)
         for ball in self.match.balls.values():
             self.draw_hammer(ball, offset)
+        # 挥砍弧画在球**上面**：刀光本来就该盖过球面，而且它标的是"砍得到
+        # 哪里"，被球挡住一半就看不出够不够得着
+        for ball in self.match.balls.values():
+            self.draw_blink_slash(ball, offset)
         self.match.effects.draw(self.screen, offset)
         self.draw_latch_label(offset)
+
+        # 暗角盖在战场内容之上，但在黑屏**之下**：它要暗的是画面，不是 HUD，
+        # 而且黑夜降临那种全黑应该盖过它，反过来会把黑屏的四角"擦亮"一点
+        self.draw_vignette()
 
         # 黑屏盖在所有战场内容**之上**（包括扣血数字和吸住读秒）——它要藏的
         # 就是换位那一瞬，有一样东西露在外面就白黑了。画在恢复裁剪之前，
@@ -355,6 +441,7 @@ class Game:
             button.draw(self.screen, body, small)
         for button in self.character_buttons:
             button.draw(self.screen, card_name, card_desc)
+        self.speed_slider.draw(self.screen, small)
 
     def draw_lasers(self, ball: Ball, offset) -> None:
         """画激光：光晕 + 外层 + 芯，三层叠出"发亮"的感觉。
@@ -455,6 +542,62 @@ class Game:
                            round(hammer.head_radius))
         pygame.draw.circle(self.screen, COLOR_HAMMER_HEAD_EDGE, center,
                            round(hammer.head_radius), HAMMER_HEAD_EDGE_WIDTH)
+
+    def draw_blink_slash(self, ball: Ball, offset) -> None:
+        """画闪现突袭：闪现那一下的圈 + 挥砍的弧光。
+
+        弧的**半径就是判定用的 reach**，和锤子按 head_radius 画是同一条原则：
+        玩家看到的范围就是真会挨砍的范围。
+
+        弧扫过的角度从 -SPREAD 到 +SPREAD，相位跟着 strike.swing 走。所以它是
+        "一刀一刀地扫"，不是一直在同一个位置亮着。摆动的相位会在两头各停一下
+        （三角波），看起来就是"挥出去、收回来"。
+        """
+        strike = ball.blink
+        if strike is None:
+            return
+
+        center = ball.center_at(offset)
+        facing = strike.facing
+        base = math.atan2(facing.y, facing.x)
+
+        # 三角波 0→1→0，把 swing 的线性增长折成来回挥
+        phase = (strike.swing % math.tau) / math.tau
+        sweep = 1.0 - abs(2.0 * phase - 1.0)
+        start = base - PHANTOM_SLASH_SPREAD
+        current = start + 2.0 * PHANTOM_SLASH_SPREAD * sweep
+
+        # 弧是折线拼的：pygame 没有画圆弧的函数，用一条粗线把若干段连起来
+        steps = PHANTOM_SLASH_STEPS
+        points = []
+        for index in range(steps + 1):
+            angle = start + (current - start) * index / steps
+            x = center[0] + math.cos(angle) * strike.reach
+            y = center[1] + math.sin(angle) * strike.reach
+            points.append((round(x), round(y)))
+        if len(points) >= 2:
+            pygame.draw.lines(self.screen, COLOR_PHANTOM, False, points,
+                              PHANTOM_SLASH_WIDTH)
+            pygame.draw.lines(self.screen, COLOR_PHANTOM_CORE, False, points, 1)
+
+        if strike.flashing:
+            # 闪现那一圈：亮度和大小都跟着剩余时间退。圈画在球面上方一点，
+            # 和球自己的描边分开，免得混成"球变粗了"
+            ratio = strike.flash_ratio
+            radius = round(ball.radius + PHANTOM_RING_PADDING * ratio)
+            pygame.draw.circle(self.screen, COLOR_PHANTOM_RING, center, radius, 2)
+
+    def draw_vignette(self) -> None:
+        """把暗角贴到战场上，强度取 Effects 这一帧收到的申报。
+
+        强度是**最深的那个来源**（见 Effects.set_vignette），不是累加——所以
+        几个技能撞在一起也不会黑成全黑。
+        """
+        strength = self.match.effects.vignette
+        if strength <= 0.0:
+            return
+        self.vignette_surface.set_alpha(round(min(1.0, strength) * 255))
+        self.screen.blit(self.vignette_surface, self.layout.arena.topleft)
 
     def draw_thrust_trail(self, ball: Ball, offset) -> None:
         """画穿刺的拖尾：从球心**逆着**冲刺方向拖出去的一条尾巴。
@@ -628,6 +771,8 @@ class Game:
             return self.web_display(ball)
         if isinstance(skill, HammerSkill):
             return self.hammer_display(ball)
+        if isinstance(skill, BlinkStrikeSkill):
+            return self.blink_display(ball, skill)
 
         if ball.skill_active:
             hook = ball.hook
@@ -723,6 +868,41 @@ class Game:
             f"巨锤 |v|{speed:.0f}",
             min(1.0, speed / HAMMER_SPEED_REFERENCE),
             COLOR_HAMMER_HEAD,
+        )
+
+    def blink_display(self, ball: Ball, skill: BlinkStrikeSkill
+                      ) -> tuple[str, float, tuple[int, int, int]]:
+        """幻影刺客的技能条。
+
+        它的技能**没有 duration**，生效多久由挥砍到什么时候结束说了算，所以
+        不能走通用那条分支（那边拿 skill_active_total 当分母，这里是 0）。
+
+        待发态和别的角色长得**不一样**是有意的：别的角色冷却好了就是"可以按
+        了"，而它冷却好了还得等场上出事。所以写的是"伺机而动"——玩家看到满格
+        绿条按了空格却没反应，得有个说法。
+        """
+        strike = ball.blink
+        if strike is not None:
+            return (
+                f"幻影突袭 {strike.slash_remaining:.1f}s",
+                strike.slash_remaining / strike.slash_total,
+                COLOR_SKILL_ACTIVE,
+            )
+        if ball.silenced:
+            return self.cooldown_display(ball, skill, COLOR_SKILL_SILENCED)
+        if ball.cooldown_timer > 0:
+            return self.cooldown_display(ball, skill, COLOR_SKILL_COOLDOWN)
+        return ("伺机而动", 1.0, COLOR_SKILL_READY)
+
+    def cooldown_display(self, ball: Ball, skill, color
+                         ) -> tuple[str, float, tuple[int, int, int]]:
+        """只画冷却进度的那一小段，给不走通用分支的技能复用。"""
+        if ball.cooldown_timer <= 0:
+            return ("沉默", 1.0, color)
+        return (
+            f"冷却 {ball.cooldown_timer:.1f}s",
+            1.0 - ball.cooldown_timer / skill.cooldown,
+            color,
         )
 
     def blit_centered(self, text: str, font: pygame.font.Font,

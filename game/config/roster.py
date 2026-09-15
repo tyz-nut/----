@@ -179,6 +179,7 @@
 from ..characters import (
     BatSwarmSkill,
     BladeSkill,
+    BlinkStrikeSkill,
     BoostSkill,
     HammerSkill,
     HookSkill,
@@ -187,6 +188,7 @@ from ..characters import (
     ThrustSkill,
     WebSkill,
 )
+from ..characters.assassin import PhantomAssassin
 from ..characters.fisher import Fisher
 from ..characters.hammer import Hammer
 from ..characters.laser import Laser
@@ -385,7 +387,7 @@ HAMMER = Hammer(
                                    # 多快（ω × 它）、以及被打飞的人飞多远
         head_radius=16.0,          # 锤头多大。**判定用的是它**，不是球半径：
                                    # 贴着球边擦过去的敌人不算挨锤，锤头扫到才算
-        damage_per_speed_sq=0.0006,  # 伤害 = 相对速度² × 这个系数。注意是**相对**
+        damage_per_speed_sq=0.0001,  # 伤害 = 相对速度² × 这个系数。注意是**相对**
                                      # 速度（锤头速度 − 对方速度），对方自己迎面撞
                                      # 上来会更疼
     ),
@@ -393,7 +395,38 @@ HAMMER = Hammer(
     # 正常弹开、不掉血。输出全在锤子上，跟撞人没关系
 )
 
+# ============================================================
+# 幻影刺客 —— 碰撞无特效，技能闪到敌人身后跟着砍
+# ============================================================
+PHANTOM = PhantomAssassin(
+    id="phantom",
+    name="幻影刺客",
+    radius=22,
+    max_hp=500,
+    description="预判闪现 · 贴身追砍",
+    # 这是全 roster 里唯一一个**不需要玩家操作**的主动技能：冷却好之后它自己
+    # 盯着场上，等预判到自己快挨打了才放（见 skills.BlinkStrikeSkill.ready）。
+    # 所以技能条上会出现"冷却满了但没亮"的待发态，那不是 bug
+    skill=BlinkStrikeSkill(
+        name="幻影突袭",
+        cooldown=12.0,             # 从挥砍结束那一刻才开始算（它有 active()，
+                                   # 见 Ball.finish_skill）
+        react_seconds=0.32,        # 往前预判多久。**别往大里调**：预判是纯外推，
+                                   # 看得越远越容易误报（比如对方其实要撞墙了）
+        react_samples=8,           # 预判采几个样，见 core/predict.py
+        blink_distance=70.0,       # 闪到敌人身后多远。落在对方"运动方向的反面"
+        flash_seconds=0.14,        # 闪现那一下的暗角 + 减速持续多久
+        slow_factor=0.22,          # 那一下把游戏速度压到几倍（和滑块是相乘的）
+        slash_seconds=1.6,         # 挥砍最多持续多久
+        slash_reach=110.0,         # 够得着多远的敌人算砍到
+        break_distance=170.0,      # 拉开这么远就收招，冷却开始走
+        damage_per_second=55.0,    # 挥砍每秒砍掉多少血
+    ),
+    # 碰撞效果：无。撞上了就是正常弹开，跟普通小球一样——它的本事全在闪现里
+)
+
 # 顺序即右栏角色卡的排列顺序
 CHARACTERS: tuple = (
     NORMAL, VAMPIRE, FISHER, LASER, SAMURAI, SPIDER, NECROMANCER, HAMMER,
+    PHANTOM,
 )
