@@ -116,6 +116,30 @@
 
   减速**不逐根相乘**：几根丝各乘一遍就是指数级地慢，两三下就贴死在原地了。
   取最狠的那一根，伤害才叠加（见 Match.apply_webs）。
+
+- 死灵法师是两个**配套**的机制，单看哪一个都不成立：
+
+  碰撞伤害算的是**对方已损**的血量（missing_hp_damage_ratio 乘的是 other，不是
+  自己），所以对方满血时这一下是 0——它不是拿来削血的，是拿来收残血的。这也
+  意味着它自己几乎不靠撞人建立优势，得等对方被别的东西磨下去。
+
+  黑夜降临（NightfallSkill）正好补上这一环：双方**互换位置和血量**。血是按时
+  间轴的"在哪一瞬"结算的——两球都活着、黑屏黑到底的那一瞬间结算一次，之后
+  各走各的（见 Match.nightfall_swap）。所以它是"先被打残、再换过来"，一个
+  稳定的翻盘手段，而不是一个输出技能。
+
+  换的是**血量百分比**，不是血量数字：按比例换（各换成对方的 hp_ratio × 自己的
+  max_hp）。两个角色 max_hp 不一样时，直接换数字会让一方凭空多出或少掉一截血。
+
+  **位置换不换要看当时的状态**，不是无条件的：两球里只要有任何一个的位置不由
+  自己说了算（霸体的渔夫、被吸住的那一对、正在被钩锁拖的人），位置就不换，
+  只换血。理由很直接——硬把一颗被钩住的球挪走，钩索会当场断在半空。穿刺
+  **不算**这一条：它只是自己跑一段，随时都能停，不欠着谁的。
+
+  cooldown **从黑屏结束那一刻**才开始走（它有 duration），所以两场黑夜之间
+  实际隔的是 cooldown + duration。整段黑屏多长是 duration，三段（渐暗 / 全黑 /
+  渐亮）各占多少是 config/settings.py 里的三个 ratio，加起来必须是 1——换位卡
+  在渐暗走完的那一瞬，rise 太短会看到球当场挪窝，太长又显得拖。
 """
 
 from ..characters import (
@@ -124,11 +148,13 @@ from ..characters import (
     BoostSkill,
     HookSkill,
     LaserSkill,
+    NightfallSkill,
     ThrustSkill,
     WebSkill,
 )
 from ..characters.fisher import Fisher
 from ..characters.laser import Laser
+from ..characters.necromancer import Necromancer
 from ..characters.normal import NormalBall
 from ..characters.samurai import Samurai
 from ..characters.spider import Spider
@@ -269,12 +295,34 @@ SPIDER = Spider(
         cooldown=0.0,
         damage_per_second=20.0,    # 压在一根丝上每秒掉多少血。**多根叠加**，
                                    # 所以这个数要按"通常只会压到一两根"来估
-        slow_ratio=0.4,            # 压在一根丝上减速多少，0.4 就是速度打六折。
+        slow_ratio=0.3,            # 压在一根丝上减速多少，0.4 就是速度打六折。
                                    # 多根**不相乘**，取最狠的那一根（见 apply_webs）
     ),
     # 没有撞击伤害这一项：和渔夫、激光、武士一样走基类默认的碰撞效果——
     # 正常弹开、不掉血。输出全在撞墙拉出来的那些丝上，跟撞人没关系
 )
 
+# ============================================================
+# 死灵法师 —— 撞人按对方**已损**血量咬一口，技能是黑夜降临（换位换血）
+# ============================================================
+NECROMANCER = Necromancer(
+    id="necromancer",
+    name="死灵法师",
+    radius=22,
+    max_hp=500,
+    description="残血收割 · 黑夜换命",
+    skill=NightfallSkill(
+        name="黑夜降临",
+        # 冷却**从黑屏结束那一刻**才开始算（它有 duration，见 skills.Skill 的说明），
+        # 所以两场黑夜之间实际隔的是 cooldown + duration
+        cooldown=20.0,
+        duration=1.2,              # 整段黑屏几秒。渐暗/全黑/渐亮三段的比例在
+                                   # config/settings.py，换位卡在渐暗走完的那一瞬
+    ),
+    # 撞一次额外掉的血 = **对方**已损血量 × 这个系数。
+    # 注意分子是对方的，不是自己的：对方越残咬得越狠，对方满血时这一下是 0
+    missing_hp_damage_ratio=0.35,
+)
+
 # 顺序即右栏角色卡的排列顺序
-CHARACTERS: tuple = (NORMAL, VAMPIRE, FISHER, LASER, SAMURAI, SPIDER)
+CHARACTERS: tuple = (NORMAL, VAMPIRE, FISHER, LASER, SAMURAI, SPIDER, NECROMANCER)

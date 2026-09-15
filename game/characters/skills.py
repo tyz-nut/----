@@ -226,6 +226,29 @@ class WebSkill(Skill):
 
 
 @dataclass(frozen=True)
+class NightfallSkill(Skill):
+    """黑夜降临：战场黑一下，黑到底的那一瞬双方互换位置与血量。
+
+    **这个技能和别的技能不一样的地方在于它改的是 Match 而不是自己**：黑屏盖的是
+    整块战场，换位动的是两颗球，没有一样是"挂在这颗球身上的状态"。所以它不往
+    ball 上写任何东西，只调 match.start_darkness，之后由 Match 自己推进（见
+    Match.update_darkness）。技能条走的还是通用那套——它有 duration，所以是
+    "先黄条（正在黑）后蓝条（冷却）"的持续型技能。
+
+    黑屏和换位是同一根时间轴上的两件事，对上关系见 darkness.py：换位卡在渐暗
+    走完的那一瞬，藏在那片黑里。
+
+    换位换什么、不换什么（尤其是霸体和被吸住的时候怎么办），写在
+    Match.nightfall_swap 上——那是这一整套里唯一真正需要想清楚的地方。
+    """
+
+    duration: float = 1.2    # 整段黑屏几秒。三段的比例在 config/settings.py
+
+    def activate(self, ball: Ball, match: Match) -> None:
+        match.start_darkness(self.duration)
+
+
+@dataclass(frozen=True)
 class BladeSkill(Skill):
     """绕身刀：一把刀一直绕着球转，蹭到敌人扣一次血，每转一圈最多蹭一次。
 

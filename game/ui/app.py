@@ -32,6 +32,7 @@ from ..config.settings import (
     COLOR_HOOK_ROPE,
     COLOR_LASER_NODE,
     COLOR_LATCH,
+    COLOR_NIGHT,
     COLOR_PANEL,
     COLOR_PANEL_BORDER,
     COLOR_PANEL_TITLE,
@@ -146,6 +147,11 @@ class Game:
         self.state = State.SELECT
         self.active_player = 0     # 底栏当前选中的操作对象
         self.debug = False
+
+        # 黑屏用的纯黑面。每帧新建一个 SRCALPHA surface 再填色是白费力气，
+        # 这里做一次、之后只改 alpha（见 draw_darkness）
+        self.night_surface = pygame.Surface(self.layout.arena.size).convert_alpha()
+        self.night_surface.fill(COLOR_NIGHT)
 
         self.build_buttons()
 
@@ -309,6 +315,11 @@ class Game:
             self.draw_blade(ball, offset)
         self.match.effects.draw(self.screen, offset)
         self.draw_latch_label(offset)
+
+        # 黑屏盖在所有战场内容**之上**（包括扣血数字和吸住读秒）——它要藏的
+        # 就是换位那一瞬，有一样东西露在外面就白黑了。画在恢复裁剪之前，
+        # 所以它只盖战场，不盖左右栏：技能条和血条还得看得见
+        self.draw_darkness()
 
         if self.debug:
             for ball in self.match.balls.values():
@@ -484,6 +495,25 @@ class Game:
         rect.clamp_ip(self.layout.arena)
         self.screen.blit(surface, rect)
 
+    def draw_darkness(self) -> None:
+        """黑夜降临的黑屏：往战场上盖一层纯黑，透明度由 Darkness.alpha 给。
+
+        三段（渐暗 / 全黑 / 渐亮）的 alpha 全部算在 Darkness.alpha 里，这里只是
+        把它贴上去——**换位那一瞬的画面就是 alpha 到 1 的那一帧**，所以黑屏和
+        换位是天然对齐的，不需要这里再做什么。
+
+        黑屏不吃镜头抖动：抖动是"镜头在晃"，而全黑的时候根本看不见战场，
+        跟着晃只会让黑框边缘露出来。
+        """
+        darkness = self.match.darkness
+        if darkness is None:
+            return
+        alpha = darkness.alpha
+        if alpha <= 0.0:
+            return
+        self.night_surface.set_alpha(round(min(1.0, alpha) * 255))
+        self.screen.blit(self.night_surface, self.layout.arena.topleft)
+
     def draw_panels(self) -> None:
         for panel in (self.layout.left_panel, self.layout.right_panel, self.layout.bottom_bar):
             pygame.draw.rect(self.screen, COLOR_PANEL, panel, border_radius=10)
@@ -533,7 +563,7 @@ class Game:
         for player, ball in sorted(self.match.balls.items()):
             hp_rect = self.layout.hp_bars[player]
             muted = tuple(round(c * BAR_FILL_MUTE) for c in ball.color)
-            draw_bar(self.screen, hp_rect, ball.hp / ball.character.max_hp, muted)
+            draw_bar(self.screen, hp_rect, ball.hp_ratio, muted)
             self.blit_centered(f"{ball.hp:.0f}", small, hp_rect)
 
             skill_rect = self.layout.skill_bars[player]

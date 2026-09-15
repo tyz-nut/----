@@ -176,6 +176,21 @@ class Ball:
         return self.hp > 0
 
     @property
+    def hp_ratio(self) -> float:
+        """血量百分比，0~1。血条、按百分比换血都用它。
+
+        用百分比而不是绝对值，是因为两个角色的 max_hp 不保证一样大：直接对调
+        数值会让拿到的那份超过上限（血条爆表），或者换过来反而比原来少。
+        """
+        maximum = self.character.max_hp
+        return self.hp / maximum if maximum > 0 else 0.0
+
+    @property
+    def missing_hp(self) -> float:
+        """已损血量。死灵法师的撞击伤害按这个算——打得越狠越疼。"""
+        return max(0.0, self.character.max_hp - self.hp)
+
+    @property
     def frozen(self) -> bool:
         """定在原地不动。
 

@@ -17,6 +17,7 @@ from .arena import Arena
 from .ball import Ball
 from ..characters import Character, CollisionOutcome
 from ..fx.effects import Effects
+from ..states.darkness import Darkness
 from ..states.hook import Hook, point_from_end, polyline_length
 from ..config.settings import (
     BALL_SPAWN_MIN_GAP,
@@ -67,6 +68,10 @@ class Match:
         self.balls: dict[int, Ball] = {}   # 玩家序号 -> 该玩家的球
         self.touching = False              # 上一帧两球是否已经贴在一起
         self.latch: Latch | None = None    # 当前粘在一起的两球
+        # 正在降临的黑夜。和 latch 一样是**全场**的东西，不属于哪一颗球——
+        # 它盖的是整块战场，顺带把双方的位置和血量对调（见 update_darkness）。
+        # 同时只有一个：两个死灵法师同时开，不该换两次把场面换回去
+        self.darkness: Darkness | None = None
         self.finished = False
         self.winner: int | None = None     # finished=True 且 winner=None 表示平局
 
@@ -93,6 +98,7 @@ class Match:
     def reset_outcome(self) -> None:
         self.touching = False
         self.latch = None
+        self.darkness = None
         self.finished = False
         self.winner = None
         # 绑住被一笔勾销，挂在人身上的沉默、飞在半路的钩锁、画在墙上的激光、
@@ -126,6 +132,9 @@ class Match:
         # 特效先推进，而且放在 finished 判断**之前**：分出胜负的那一下也得把
         # 圈炸完、把数字飘完，不能打死人的瞬间画面就定住了
         self.effects.update(dt)
+        # 黑夜放在 finished 判断**之前**：打死人的那一下要是正好在黑屏里，
+        # 画面也得淡回来，不能永远黑在那儿
+        self.update_darkness(dt)
         if self.finished:
             return
 
@@ -430,6 +439,73 @@ class Match:
                 self.effects.impact(owner, target,
                                     first_takes=0.0, second_takes=blade.damage)
         self.judge()
+
+    # ---------------- 黑夜降临 ----------------
+    def start_darkness(self, total: float) -> None:
+        """拉下一次黑夜。已经在黑着就不再拉——同时只有一场。
+
+        这不是为了省事：两个死灵法师的技能是同时冷却好的（都是开局就没冷却），
+        不挡一下的话两场黑夜会一前一后各换一次位，等于什么都没换。挡掉第二场，
+        换位就只发生一次，两边看到的都是对方的场面。
+        """
+        if self.darkness is None:
+            self.darkness = Darkness.for_duration(total)
+
+    def update_darkness(self, dt: float) -> None:
+        """推进黑屏：黑到底的那一瞬换位，淡完就收工。"""
+        darkness = self.darkness
+        if darkness is None:
+            return
+        darkness.elapsed += dt
+        if not darkness.swapped and darkness.blacked_out:
+            darkness.swapped = True
+            # 已经分出胜负就不再换位：对面可能已经死了，把 0 血换过来会连带
+            # 把赢家也拖成 0，一场明明打赢了的对局变成平局
+            if all(ball.alive for ball in self.balls.values()):
+                self.nightfall_swap()
+        if darkness.finished:
+            self.darkness = None
+
+    def nightfall_swap(self) -> None:
+        """黑夜的正题：双方**互换位置与血量**，动量和其他一切都留在原地。
+
+        血量没有例外，**永远换**，而且换的是百分比（两个角色的 max_hp 不保证
+        一样大，直接对调数值会爆表，见 Ball.hp_ratio）。
+
+        位置要挑人换：位置正在被"摆"的一方动不了，硬换等于把它从控制里拽出来。
+        用户定下的规则是三种情况不换：
+
+        - 甩着钩锁的渔夫（霸体，定在原地）——连他一块不换，因为换位是**一对**
+          的事，他不动，对面也就没有"另一个位置"可以换过去；
+        - 正被钩锁拖回来的人（位置由折线定，同样是被摆的）；
+        - 吸住的一对（连体位移期间两人都算伪霸体：会一起飞，但不受外力影响）。
+
+        穿刺不在此列：它只是"这颗球自己沿着一个方向在走"，位置还是自己的，
+        而且打没打中是每帧实时判距离的（见 check_thrust_hit），换完接着冲就是。
+        """
+        first, second = (self.balls[player] for player in sorted(self.balls))
+
+        if not (self.position_held(first) or self.position_held(second)):
+            first.position, second.position = (
+                Vector2(second.position), Vector2(first.position)
+            )
+
+        first_ratio, second_ratio = first.hp_ratio, second.hp_ratio
+        first.hp = second_ratio * first.character.max_hp
+        second.hp = first_ratio * second.character.max_hp
+
+    def position_held(self, ball: Ball) -> bool:
+        """这颗球的位置是不是正在被别人摆（而不是按自己的动量在走）。
+
+        三种球：定住不动的、被折线拖着的、粘成一团飞的。见 nightfall_swap。
+        """
+        if ball.frozen:
+            return True
+        latch = self.latch
+        if latch is not None and ball.player in (latch.grabber, latch.victim):
+            return True
+        pair = self.pulled_pair()
+        return pair is not None and ball in pair
 
     # ---------------- 蛛丝 ----------------
     def apply_webs(self, dt: float) -> None:
