@@ -12,7 +12,7 @@ from pygame.math import Vector2
 
 from ..core.arena import Arena
 from ..core.ball import Ball
-from ..characters import Character, LaserSkill
+from ..characters import Character, LaserSkill, WebSkill
 from ..config.settings import (
     BAR_FILL_MUTE,
     BAR_TEXT,
@@ -42,6 +42,8 @@ from ..config.settings import (
     COLOR_TEXT,
     COLOR_TEXT_DIM,
     COLOR_THRUST,
+    COLOR_WEB,
+    COLOR_WEB_ANCHOR,
     COLOR_WINNER,
     DAMAGE_NUMBER_FONT,
     DEBUG_VELOCITY_SCALE,
@@ -61,6 +63,8 @@ from ..config.settings import (
     PLAYER_NAMES,
     THRUST_TRAIL_LENGTH,
     THRUST_TRAIL_WIDTH,
+    WEB_ANCHOR_RADIUS,
+    WEB_WIDTH,
     WINDOW_HEIGHT,
     WINDOW_TITLE,
     WINDOW_WIDTH,
@@ -288,6 +292,10 @@ class Game:
         # 激光画在球**下面**：它是画在墙上的背景物，压在球上会像割过球面
         for ball in self.match.balls.values():
             self.draw_lasers(ball, offset)
+        # 蛛丝也画在球下面：它从蜘蛛身上出发、一路绷到墙上，压在球上会像
+        # 一根穿过球体的棍子。画在激光之后，免得被线多的激光盖住
+        for ball in self.match.balls.values():
+            self.draw_webs(ball, offset)
         for ball in self.match.balls.values():
             self.draw_hook(ball, offset)
         for ball in self.match.balls.values():
@@ -375,6 +383,24 @@ class Game:
         if len(points) >= 2:
             pygame.draw.lines(self.screen, COLOR_HOOK_ROPE, False, points, 2)
         pygame.draw.circle(self.screen, COLOR_HOOK, points[-1], HOOK_RADIUS)
+
+    def draw_webs(self, ball: Ball, offset) -> None:
+        """画蛛丝：从蜘蛛现在的位置拉一条线到墙上的锚点，锚点画成一个小点。
+
+        只画一层、画得很细：丝不封顶，打久了会有几十根，跟激光那样叠三层
+        光晕会糊成一片白雾。它本来也不是发光的东西，是一根绷着的线。
+
+        起点取**当前**位置而不是记住的历史坐标——这正是蛛丝和激光的区别：
+        蜘蛛跑到哪，这些线就从哪重新拉出来，看着像一把跟着人扫的扇子。
+        """
+        if not ball.webs:
+            return
+        start = ball.center_at(offset)
+        for web in ball.webs:
+            end = (round(web.point.x + offset.x), round(web.point.y + offset.y))
+            pygame.draw.line(self.screen, COLOR_WEB, start, end, WEB_WIDTH)
+            pygame.draw.circle(self.screen, COLOR_WEB_ANCHOR, end,
+                               WEB_ANCHOR_RADIUS)
 
     def draw_blade(self, ball: Ball, offset) -> None:
         """画绕身刀：从球心往外伸的一段刃，加根部那个小圆点。
@@ -541,6 +567,8 @@ class Game:
 
         if isinstance(skill, LaserSkill):
             return self.laser_display(ball, skill)
+        if isinstance(skill, WebSkill):
+            return self.web_display(ball)
 
         if ball.skill_active:
             hook = ball.hook
@@ -598,6 +626,20 @@ class Game:
         # 5 根线时条满。再多也不封顶，条就停在满格——这里只是个观感上的刻度，
         # 不影响任何判定
         return (f"激光 {beam_count} 根", min(1.0, beam_count / 5.0), COLOR_BEAM)
+
+    def web_display(self, ball: Ball) -> tuple[str, float, tuple[int, int, int]]:
+        """蛛丝的技能条。
+
+        和激光一样是被动，没有冷却也没有生效时长，所以条上画不了"还要等多久"，
+        能画的是它**攒到哪一步了**——已经钉出去几根丝。条本身当计数器用。
+
+        刻度取 8 根：蛛丝比激光出得快（撞一下就一根，激光要撞两下），满格自然
+        也该来得快一点。这只是观感上的刻度，不影响任何判定。
+        """
+        anchors = 0 if ball.webs is None else len(ball.webs)
+        if anchors == 0:
+            return ("结网", 0.0, COLOR_WEB)
+        return (f"蛛丝 {anchors} 根", min(1.0, anchors / 8.0), COLOR_WEB)
 
     def blit_centered(self, text: str, font: pygame.font.Font,
                       rect: pygame.Rect) -> None:

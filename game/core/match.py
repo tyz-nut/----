@@ -95,13 +95,14 @@ class Match:
         self.latch = None
         self.finished = False
         self.winner = None
-        # 绑住被一笔勾销，挂在人身上的沉默、飞在半路的钩锁、画在墙上的激光
-        # 也得跟着走，否则重开之后有一方会带着莫名其妙的封印、渔夫会定在原地
-        # 动不了、上一局切出来的那些线还会继续割人
+        # 绑住被一笔勾销，挂在人身上的沉默、飞在半路的钩锁、画在墙上的激光、
+        # 绷出去的蛛丝也得跟着走，否则重开之后有一方会带着莫名其妙的封印、
+        # 渔夫会定在原地动不了、上一局切出来的那些线还会继续割人
         for ball in self.balls.values():
             ball.unsilence()
             ball.hook = None
             ball.lasers = None
+            ball.webs = None
             ball.thrust = None
             # 刀不在这里清——它是常驻被动，跟血量一样属于"球生来就有的东西"，
             # 由 on_spawn 在造球的时候挂上。重开时球是新建的，刀自然是新的
@@ -139,6 +140,7 @@ class Match:
         # 人也照样会被线打到——线是画在墙上的，跟谁在动没关系
         self.apply_lasers(dt)
         self.apply_blades(dt)
+        self.apply_webs(dt)
         if self.finished:
             return
 
@@ -427,6 +429,45 @@ class Match:
                 target.take_damage(blade.damage)
                 self.effects.impact(owner, target,
                                     first_takes=0.0, second_takes=blade.damage)
+        self.judge()
+
+    # ---------------- 蛛丝 ----------------
+    def apply_webs(self, dt: float) -> None:
+        """结算蜘蛛拉的那些丝：压在上面的敌人被减速，并按丝数叠加掉血。
+
+        丝是**一头钉墙、一头连着自己**的，所以这一帧的线要现算：起点是蜘蛛
+        现在的位置，不是某个记下来的历史坐标。蜘蛛跑动的时候这把"扇子"整个
+        跟着扫，敌人站在哪都可能突然被扫到。
+
+        和光环、激光、刀同一批结算，都放在吸住/钩锁的提前返回之前——被吸住、
+        被拖着的人也照样会被丝扫到。蜘蛛自己有霸体也逃不掉这件事：这不属于
+        "被推动"。
+
+        **自己的丝不伤自己**，和激光同理。顺带一提，蜘蛛本人永远压在自己的
+        每一根丝上（线就从它身上出发），少了这条排除，它开局就在自杀。
+
+        减速取**最狠的那一根**而不是逐根相乘：每根丝都按比例乘一遍的话，几根
+        丝叠起来就是指数级地慢，两三下就贴死在原地了。伤害才是叠加的。
+        """
+        for owner in self.balls.values():
+            if not owner.webs or not owner.alive:
+                continue
+            for target in self.balls.values():
+                if target is owner or not target.alive:
+                    continue
+                touched = [
+                    web for web in owner.webs
+                    if web.touches(owner.position, target.position, target.radius)
+                ]
+                if not touched:
+                    continue
+                target.speed_scale = min(
+                    target.speed_scale,
+                    1.0 - max(web.slow_ratio for web in touched),
+                )
+                dealt = sum(web.damage_per_second for web in touched) * dt
+                target.take_damage(dealt)
+                self.effects.drain_damage(target.player, target.position, dealt)
         self.judge()
 
     # ---------------- 穿刺 ----------------

@@ -195,6 +195,37 @@ class LaserSkill(Skill):
 
 
 @dataclass(frozen=True)
+class WebSkill(Skill):
+    """结网：撞一次墙就在墙上钉一个锚点，从自己身上拉一根丝过去。
+
+    和激光同属**触发式被动**（走 on_wall_hit，ready 钉死成 False，不占技能条），
+    但两者的线完全不是一回事：
+
+    - 激光要撞够**两面不同的墙**才连出一条，那条线两端都钉在墙上，跟人无关。
+    - 蛛丝撞一下就出一根，而且**一头永远连着自己**——球跑到哪，丝就扫到哪。
+
+    所以蛛丝的威胁范围是"以自己为顶点的一把扇子"，而不是"场地上几条固定的
+    线"。代价是刚钉下的那一下丝只有一个半径长，得跑开才拉得开。
+
+    敌人压上任何一根丝都会被减速并持续掉血，**多根叠着碰到就叠着算**。
+    """
+
+    damage_per_second: float = 20.0   # 压在一根丝上每秒掉多少血（多根会叠加）
+    slow_ratio: float = 0.4           # 压在一根丝上减速多少，0.4 就是速度打六折
+
+    def ready(self, ball: Ball) -> bool:
+        return False
+
+    def activate(self, ball: Ball, match: Match) -> None:
+        """被动技能没有"放"这个动作。真的被调到了说明哪里写错了。"""
+        raise NotImplementedError("结网是被动技能，不该被 activate")
+
+    def on_wall_hit(self, ball: Ball, match: Match, point: Vector2,
+                    side: str) -> None:
+        ball.anchor_web(point, self.damage_per_second, self.slow_ratio)
+
+
+@dataclass(frozen=True)
 class BladeSkill(Skill):
     """绕身刀：一把刀一直绕着球转，蹭到敌人扣一次血，每转一圈最多蹭一次。
 

@@ -18,6 +18,7 @@ from ..characters import Character
 from ..states.hook import Hook
 from ..states.laser import Beam, LaserField
 from ..states.thrust import Thrust
+from ..states.web import WebAnchor
 from ..config.settings import (
     BALL_SPEED_MAX,
     BALL_SPEED_MIN,
@@ -102,6 +103,9 @@ class Ball:
     # 正在冲的那一下穿刺。这个**是**"技能生效中"的标记（和 hook 同类）：
     # 冲刺的这几帧球不按自己的动量走，位置由 Match.update_thrusts 摆
     thrust: Thrust | None = None
+    # 自己钉在墙上的那些蛛丝锚点（蜘蛛的被动）。和 lasers 同类，是"我留下了
+    # 什么"的账本。每一根的另一头都连着**现在的自己**，所以这里只存墙上那点
+    webs: list[WebAnchor] | None = None
     # 当前朝向（单位向量）。速度被清零时还得靠它决定加速那一截往哪走
     heading: Vector2 = field(default_factory=lambda: Vector2(1.0, 0.0))
 
@@ -398,6 +402,27 @@ class Ball:
         grid.pending = None
         grid.pending_side = ""
         return True
+
+    def anchor_web(self, point: Vector2, damage_per_second: float,
+                   slow_ratio: float) -> None:
+        """在墙上钉一个锚点，从现在的位置拉出一根丝。
+
+        和 record_wall_hit 是两种"撞墙留下东西"：那边要攒够两次才出一条线，
+        这边撞一下就出一根，而且出的这根**立刻就能用**——不用等下一次撞墙。
+
+        另一头**不记**：丝绷在锚点和"现在的自己"之间，球走到哪丝就从哪出发
+        （见 Match.apply_webs）。所以刚钉下时这根丝只有一个半径那么长（锚点
+        就在脚下那面墙上），球跑开之后才慢慢拉成一条横贯场地的长线。
+
+        没有上限，也不会过期，和激光一个道理：这就是这个角色的成长曲线。
+        """
+        if self.webs is None:
+            self.webs = []
+        self.webs.append(WebAnchor(
+            point=Vector2(point),
+            damage_per_second=damage_per_second,
+            slow_ratio=slow_ratio,
+        ))
 
     def silence(self) -> None:
         """封住技能。这是一条**通用状态**，谁都能挂——吸住会挂它，以后别的技能

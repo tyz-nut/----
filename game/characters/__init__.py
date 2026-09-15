@@ -19,7 +19,9 @@ from .skills import (
     LaserSkill,
     Skill,
     ThrustSkill,
+    WebSkill,
 )
+from .spider import Spider
 from .vampire import Vampire
 
 __all__ = [
@@ -32,9 +34,11 @@ __all__ = [
     "LaserSkill",
     "BladeSkill",
     "ThrustSkill",
+    "WebSkill",
     "NormalBall",
     "Vampire",
     "Fisher",
     "Laser",
     "Samurai",
+    "Spider",
 ]

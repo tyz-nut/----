@@ -105,6 +105,17 @@
 
   够着了就停在对方身前收招，所以 thrust_distance 是**射程**，不是"一定会走完
   的路程"：打中的那一次往往冲不到头。撞墙同理，贴着墙出手等于白放。
+
+- 蜘蛛也是**被动**，和激光同类（撞墙触发，走 on_wall_hit）。区别在线的两头：
+  激光那条线两端都钉在墙上，跟人无关；蛛丝**一头钉墙、一头永远是蜘蛛本人**，
+  所以蜘蛛一跑，整把丝就跟着扫过去。
+
+  这决定了蛛丝的威胁是"以自己为顶点的一把扇子"而不是场地上几条固定的线，
+  也决定了它**刚钉下时几乎没有用**（锚点就在脚下那面墙上，丝只有一个半径长），
+  要跑开才拉得开。所以 damage_per_second 要按"跑起来之后同时压到几根"来估。
+
+  减速**不逐根相乘**：几根丝各乘一遍就是指数级地慢，两三下就贴死在原地了。
+  取最狠的那一根，伤害才叠加（见 Match.apply_webs）。
 """
 
 from ..characters import (
@@ -114,11 +125,13 @@ from ..characters import (
     HookSkill,
     LaserSkill,
     ThrustSkill,
+    WebSkill,
 )
 from ..characters.fisher import Fisher
 from ..characters.laser import Laser
 from ..characters.normal import NormalBall
 from ..characters.samurai import Samurai
+from ..characters.spider import Spider
 from ..characters.vampire import Vampire
 
 # ============================================================
@@ -240,5 +253,28 @@ SAMURAI = Samurai(
     # 不掉血。撞人本身不输出，输出全在刀和穿刺上
 )
 
+# ============================================================
+# 蜘蛛 —— 碰撞效果无，靠撞墙拉出来的蛛丝输出
+# ============================================================
+SPIDER = Spider(
+    id="spider",
+    name="蜘蛛",
+    radius=22,
+    max_hp=500,
+    description="撞墙拉丝 · 缠身减速",
+    skill=WebSkill(
+        name="结网",
+        # 被动技能用不到这个数（WebSkill.ready 恒为 False，永远不会被"放"），
+        # 但 Skill 基类要求有；填 0 是最不容易误读的
+        cooldown=0.0,
+        damage_per_second=20.0,    # 压在一根丝上每秒掉多少血。**多根叠加**，
+                                   # 所以这个数要按"通常只会压到一两根"来估
+        slow_ratio=0.4,            # 压在一根丝上减速多少，0.4 就是速度打六折。
+                                   # 多根**不相乘**，取最狠的那一根（见 apply_webs）
+    ),
+    # 没有撞击伤害这一项：和渔夫、激光、武士一样走基类默认的碰撞效果——
+    # 正常弹开、不掉血。输出全在撞墙拉出来的那些丝上，跟撞人没关系
+)
+
 # 顺序即右栏角色卡的排列顺序
-CHARACTERS: tuple = (NORMAL, VAMPIRE, FISHER, LASER, SAMURAI)
+CHARACTERS: tuple = (NORMAL, VAMPIRE, FISHER, LASER, SAMURAI, SPIDER)
