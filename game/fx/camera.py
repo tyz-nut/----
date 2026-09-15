@@ -15,7 +15,7 @@ import random
 
 from pygame.math import Vector2
 
-from .config import SHAKE_DECAY, SHAKE_MAX_OFFSET
+from ..config.settings import SHAKE_DECAY, SHAKE_MAX_OFFSET
 
 
 class Camera:

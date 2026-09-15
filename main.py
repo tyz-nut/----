@@ -3,7 +3,7 @@
 运行：python main.py
 """
 
-from game.app import Game
+from game.ui.app import Game
 
 
 def main() -> None:

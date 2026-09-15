@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import pygame
 
-from .config import (
+from ..config.settings import (
     ACTION_BUTTON_GAP,
     ACTION_BUTTON_HEIGHT,
     ARENA_SIZE,

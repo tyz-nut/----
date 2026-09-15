@@ -6,7 +6,7 @@
 所以不需要覆盖 on_collision。这个类存在的意义是给这个角色一个说明自己的
 地方，以及以后要改时有个落脚点。
 
-数值不在这里，在 game/config_characters.py。
+数值不在这里，在 game/config/roster.py。
 """
 
 from __future__ import annotations

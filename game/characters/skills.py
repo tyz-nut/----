@@ -1,7 +1,7 @@
 """特殊技能。
 
 和碰撞效果同一套思路：Skill 是基类，具体技能是子类；数值写在
-config_characters.py，行为写在这里。加技能 = 在本文件加一个类，
+config/roster.py，行为写在这里。加技能 = 在本文件加一个类，
 再到 config 里给角色挑一个。
 
 技能自己**不保存状态**——它只负责"放出来的时候对球做什么"，
@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING
 from pygame.math import Vector2
 
 if TYPE_CHECKING:
-    from ..ball import Ball
-    from ..match import Match
+    from ..core.ball import Ball
+    from ..core.match import Match
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ class Skill:
     - duration > 0：持续型技能，先走完这段生效时长，**这段时间不计冷却**，
       等它结束了冷却才从 0 开始走。蝙蝠圈就是这种。
 
-    两者在技能条上是两根不同方向、不同颜色的条，见 app.Game.skill_display。
+    两者在技能条上是两根不同方向、不同颜色的条，见 ui/app.Game.skill_display。
     """
 
     name: str
@@ -78,7 +78,7 @@ class Skill:
         放一次，而被动技能的条件是"发生了某件事"。挂在这里之后，Match 不需要
         知道场上有哪些被动——它只管在球撞墙的时候喊一声，谁想听谁听。
 
-        point 是墙面上的撞点，side 是哪一面墙（见 laser.py 的四个常量）。
+        point 是墙面上的撞点，side 是哪一面墙（见 core/arena.py 的四个常量）。
         """
         return
 

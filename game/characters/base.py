@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from .skills import Skill
 
 if TYPE_CHECKING:
-    from ..ball import Ball
+    from ..core.ball import Ball
 
 
 @dataclass(frozen=True)

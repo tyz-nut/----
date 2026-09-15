@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 from pygame.math import Vector2
 
-from .segment import distance_to_segment
+from ..core.segment import distance_to_segment
 
 TAU = math.tau
 

@@ -15,14 +15,7 @@ from dataclasses import dataclass, field
 
 from pygame.math import Vector2
 
-from .segment import distance_to_segment
-
-# 四面墙的名字。用字符串而不是 Enum：它只用来比相等（"这次撞的和攒着的是不是
-# 同一面"），没有别处要遍历或排序，Enum 的仪式感在这里换不来什么
-LEFT = "left"
-RIGHT = "right"
-TOP = "top"
-BOTTOM = "bottom"
+from ..core.segment import distance_to_segment
 
 
 @dataclass

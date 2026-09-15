@@ -14,14 +14,22 @@ from dataclasses import dataclass
 import pygame
 from pygame.math import Vector2
 
-from .laser import BOTTOM, LEFT, RIGHT, TOP
-from .config import (
+from ..config.settings import (
     ARENA_BORDER_WIDTH,
     BALL_SPAWN_MARGIN,
     BALL_SPAWN_MAX_TRIES,
     COLOR_ARENA_BORDER,
     COLOR_ARENA_FILL,
 )
+
+# 四面墙的名字。用字符串而不是 Enum：它只用来比相等（"这次撞的和攒着的是不是
+# 同一面"），没有别处要遍历或排序，Enum 的仪式感在这里换不来什么。
+# 定义在战场这边，因为"哪一面墙"是撞墙这件事产出的东西（见 WallHit.side），
+# 用它的激光只是恰好要按面记点
+LEFT = "left"
+RIGHT = "right"
+TOP = "top"
+BOTTOM = "bottom"
 
 
 @dataclass(frozen=True)
@@ -34,7 +42,7 @@ class WallHit:
     """
 
     point: Vector2
-    side: str        # laser.LEFT / RIGHT / TOP / BOTTOM
+    side: str        # LEFT / RIGHT / TOP / BOTTOM
 
 
 def _fold_axis(value: float, low: float, high: float) -> tuple[float, float]:

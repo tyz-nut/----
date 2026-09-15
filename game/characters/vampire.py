@@ -3,7 +3,7 @@
 这个角色是"碰撞效果可以被覆盖"的示范：基类只主张弹开，它把弹开换成
 "吸住 + 持续吸取"，并顺带封住对方的技能。
 
-数值不在这里，在 game/config_characters.py。
+数值不在这里，在 game/config/roster.py。
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from .base import Character, CollisionOutcome
 
 if TYPE_CHECKING:
-    from ..ball import Ball
+    from ..core.ball import Ball
 
 
 @dataclass(frozen=True)

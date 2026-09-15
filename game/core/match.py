@@ -15,10 +15,10 @@ from pygame.math import Vector2
 
 from .arena import Arena
 from .ball import Ball
-from .characters import Character, CollisionOutcome
-from .effects import Effects
-from .hook import Hook, point_from_end, polyline_length
-from .config import (
+from ..characters import Character, CollisionOutcome
+from ..fx.effects import Effects
+from ..states.hook import Hook, point_from_end, polyline_length
+from ..config.settings import (
     BALL_SPAWN_MIN_GAP,
     COLOR_HOOK,
     HOOK_RELEASE_SPEED,

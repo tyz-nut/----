@@ -10,10 +10,10 @@ from pathlib import Path
 import pygame
 from pygame.math import Vector2
 
-from .arena import Arena
-from .ball import Ball
-from .characters import Character, LaserSkill
-from .config import (
+from ..core.arena import Arena
+from ..core.ball import Ball
+from ..characters import Character, LaserSkill
+from ..config.settings import (
     BAR_FILL_MUTE,
     BAR_TEXT,
     BEAM_CORE_WIDTH,
@@ -65,11 +65,11 @@ from .config import (
     WINDOW_TITLE,
     WINDOW_WIDTH,
 )
-from .config_characters import CHARACTERS
-from .effects import Effects
+from ..config.roster import CHARACTERS
+from ..fx.effects import Effects
 from .layout import build_layout
-from .match import Match
-from .ui import Button, draw_bar
+from ..core.match import Match
+from .widgets import Button, draw_bar
 
 
 class State(Enum):

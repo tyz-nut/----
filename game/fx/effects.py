@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pygame.math import Vector2
 
 from .camera import Camera
-from .config import (
+from ..config.settings import (
     COLOR_DOT_TEXT,
     COLOR_HEAL_TEXT,
     COLOR_IMPACT,

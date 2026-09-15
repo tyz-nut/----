@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 import pygame
 from pygame.math import Vector2
 
-from .config import DAMAGE_NUMBER_FONT
+from ..config.settings import DAMAGE_NUMBER_FONT
 
 
 @dataclass

@@ -7,7 +7,7 @@
 任何效果，输出全部来自"撞墙"这件事——那条路径在 Ball.record_wall_hit 和
 Match.apply_lasers 上。
 
-数值不在这里，在 game/config_characters.py。
+数值不在这里，在 game/config/roster.py。
 """
 
 from __future__ import annotations

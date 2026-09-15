@@ -13,12 +13,12 @@ from dataclasses import dataclass, field
 import pygame
 from pygame.math import Vector2
 
-from .blade import Blade
-from .characters import Character
-from .hook import Hook
-from .laser import Beam, LaserField
-from .thrust import Thrust
-from .config import (
+from ..states.blade import Blade
+from ..characters import Character
+from ..states.hook import Hook
+from ..states.laser import Beam, LaserField
+from ..states.thrust import Thrust
+from ..config.settings import (
     BALL_SPEED_MAX,
     BALL_SPEED_MIN,
     COLOR_AURA_FILL,

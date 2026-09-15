@@ -7,7 +7,7 @@ from typing import Callable
 
 import pygame
 
-from .config import (
+from ..config.settings import (
     COLOR_BAR_BACK,
     COLOR_BAR_BORDER,
     COLOR_BUTTON,

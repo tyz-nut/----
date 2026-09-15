@@ -4,7 +4,7 @@
 这是**这个角色独有的**，不是所有角色的底子——基类的默认碰撞效果只是弹开，
 另外三个角色（吸血鬼、渔夫、激光）撞人都不掉血。
 
-数值不在这里，在 game/config_characters.py。
+数值不在这里，在 game/config/roster.py。
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from .base import Character, CollisionOutcome
 
 if TYPE_CHECKING:
-    from ..ball import Ball
+    from ..core.ball import Ball
 
 
 @dataclass(frozen=True)

@@ -2,7 +2,7 @@
 
 这里只有"行为"：角色怎么参与碰撞（base.py / normal.py / vampire.py），
 以及技能放出来是什么效果（skills.py）。角色的数值全部集中在
-game/config_characters.py —— 注册表也在那边，所以这个包不 import 它，
+game/config/roster.py —— 注册表也在那边，所以这个包不 import 它，
 免得绕成循环导入。
 """
 

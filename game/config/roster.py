@@ -107,7 +107,7 @@
   的路程"：打中的那一次往往冲不到头。撞墙同理，贴着墙出手等于白放。
 """
 
-from .characters import (
+from ..characters import (
     BatSwarmSkill,
     BladeSkill,
     BoostSkill,
@@ -115,11 +115,11 @@ from .characters import (
     LaserSkill,
     ThrustSkill,
 )
-from .characters.fisher import Fisher
-from .characters.laser import Laser
-from .characters.normal import NormalBall
-from .characters.samurai import Samurai
-from .characters.vampire import Vampire
+from ..characters.fisher import Fisher
+from ..characters.laser import Laser
+from ..characters.normal import NormalBall
+from ..characters.samurai import Samurai
+from ..characters.vampire import Vampire
 
 # ============================================================
 # 普通小球 —— 碰撞走基类的默认行为，技能走通用的加速
@@ -137,7 +137,7 @@ NORMAL = NormalBall(
     ),
     # 撞一次掉的血 = 撞上瞬间的自身移速² × 这个系数。
     # 注意那个速度是**撞上那一刻**的，平飞的时候并不掉血
-    impact_damage_per_speed_sq=0.0005,
+    impact_damage_per_speed_sq=0.0003,
 )
 
 # ============================================================
@@ -153,14 +153,14 @@ VAMPIRE = Vampire(
         name="化作蝙蝠",
         cooldown=15.0,             # 冷却秒数
         duration=5.0,              # 圈持续秒数
-        radius=250.0,              # 圈的半径（像素）。战场宽 600，能盖住相当一片
+        radius=300.0,              # 圈的半径（像素）。战场宽 600，能盖住相当一片
         slow_ratio=0.3,            # 圈内敌人减速比例，0.5 就是速度砍半
-        drain_per_second=10.0,     # 圈内每秒从敌人身上吸走多少血（5 秒共 125）
+        drain_per_second=20.0,     # 圈内每秒从敌人身上吸走多少血（5 秒共 125）
     ),
     # 没有撞击伤害这一项：吸血鬼的碰撞效果整条写在 game/characters/vampire.py
     # 里，撞上对手只抓不撞，输出全在"吸"上。
     latch_seconds=3.0,             # 吸住持续秒数
-    drain_per_second=10.0,         # 吸住期间每秒从对方身上吸走多少血
+    drain_per_second=20.0,         # 吸住期间每秒从对方身上吸走多少血
 )
 
 # ============================================================
@@ -221,11 +221,10 @@ SAMURAI = Samurai(
         name="穿刺",
         cooldown=6.0,              # 冷却秒数。冲刺本身是瞬时结算的（duration = 0），
                                    # 所以冲完立刻开始走冷却
-        thrust_speed=1800.0,       # 冲刺速度（像素/秒）。正常移速的三到八倍，
+        thrust_speed=1600.0,       # 冲刺速度（像素/秒）。正常移速的三到八倍，
                                    # 对方基本来不及让开——这是这个技能的主要命中来源
-        thrust_distance=320.0,     # 一次冲多远（像素）。撞墙就在墙前停下，
-                                   # 贴着墙出手等于白放
-        damage=120.0,              # 冲到了扣这么多，一次穿刺只扣一下
+        thrust_distance=320.0,     # 一次冲多远（像素）。撞墙就在墙撞人前停下
+        damage=60.0,               # 冲到了扣这么多，一次穿刺只扣一下
     ),
     # 常驻被动：不占技能条，也不吃冷却。转速和伤害填在这里
     passive=BladeSkill(
@@ -234,8 +233,8 @@ SAMURAI = Samurai(
         angular_speed=4.0,         # 角速度（弧度/秒）。2π/4 ≈ 1.6 秒转一圈，
                                    # 也就是每个敌人每 1.6 秒最多挨一下
         inner_radius=18.0,         # 刀刃内端离球心多远（贴着球面，略小于半径 22）
-        outer_radius=46.0,         # 刀刃外端。刀比球本身长一倍，贴上去就得吃
-        damage=45.0,               # 蹭一下扣多少血
+        outer_radius=160.0,        # 刀刃外端
+        damage=25.0,               # 蹭一下扣多少血
     ),
     # 没有撞击伤害这一项：和渔夫、激光一样走基类默认的碰撞效果——正常弹开、
     # 不掉血。撞人本身不输出，输出全在刀和穿刺上
