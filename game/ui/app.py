@@ -16,11 +16,13 @@ from ..core.ball import Ball
 from ..characters import (
     BlinkStrikeSkill,
     Character,
+    GoSkill,
     HammerSkill,
     LaserSkill,
     VirulenceSkill,
     WebSkill,
 )
+from ..states.go_board import BLACK as STONE_BLACK
 from ..config.settings import (
     BAR_FILL_MUTE,
     BAR_TEXT,
@@ -30,12 +32,14 @@ from ..config.settings import (
     BLADE_EDGE_WIDTH,
     BLADE_HUB_RADIUS,
     BLADE_WIDTH,
+    BOARD_LINE_WIDTH,
     COLOR_BG,
     COLOR_BEAM,
     COLOR_BEAM_CORE,
     COLOR_BEAM_GLOW,
     COLOR_BLADE,
     COLOR_BLADE_EDGE,
+    COLOR_BOARD_LINE,
     COLOR_HAMMER_HEAD,
     COLOR_HAMMER_HEAD_EDGE,
     COLOR_HAMMER_SHAFT,
@@ -55,6 +59,10 @@ from ..config.settings import (
     COLOR_SKILL_READY,
     COLOR_SKILL_SILENCED,
     COLOR_SPIKE_SPENT,
+    COLOR_STONE_BLACK,
+    COLOR_STONE_BLACK_EDGE,
+    COLOR_STONE_WHITE,
+    COLOR_STONE_WHITE_EDGE,
     COLOR_TEXT,
     COLOR_TEXT_DIM,
     COLOR_THRUST,
@@ -87,6 +95,8 @@ from ..config.settings import (
     PHANTOM_SLASH_STEPS,
     PHANTOM_SLASH_WIDTH,
     PLAYER_NAMES,
+    STONE_EDGE_WIDTH,
+    STONE_RADIUS_RATIO,
     THRUST_TRAIL_LENGTH,
     THRUST_TRAIL_WIDTH,
     TIME_SCALE_DEFAULT,
@@ -391,6 +401,9 @@ class Game:
         self.screen.set_clip(self.layout.arena)
 
         # 光环先画：它是半透明的，盖在球上会把球糊掉
+        # 棋盘画在最底下：它是**地面上的刻度**，别的东西都从它上面过去。
+        # 比光环还早，所以减速罩、激光、蛛丝、球全压在它上面
+        self.draw_go_board(offset)
         for ball in self.match.balls.values():
             ball.draw_aura(self.screen, offset)
         # 激光画在球**下面**：它是画在墙上的背景物，压在球上会像割过球面
@@ -411,6 +424,10 @@ class Game:
         # 中毒的圈和光环一样在球**之前**画：它是套在球面上的，盖上去像球变胖了
         for ball in self.match.balls.values():
             ball.draw_venom(self.screen, offset)
+        # 减速那一圈比中毒那圈更靠外，两圈能同时看见——一颗球完全可能既中着
+        # 毒又被棋子炸慢
+        for ball in self.match.balls.values():
+            ball.draw_slow(self.screen, offset)
         for ball in self.match.balls.values():
             ball.draw(self.screen, offset)
         # 刀画在球**上面**：刀根扎在球心附近，压在球下就只剩外面半截，
@@ -462,6 +479,49 @@ class Game:
         for button in self.character_buttons:
             button.draw(self.screen, card_name, card_desc)
         self.speed_slider.draw(self.screen, small)
+
+    def draw_go_board(self, offset) -> None:
+        """画棋盘：先把格子线铺出来，再把棋子画上去。
+
+        两样缺一不可。只有线没有子，看不出棋盘上现在有没有雷；只有子没有线，
+        看不出它占的是哪一格、旁边那格空不空——而"哪一格有子"正是这个角色唯一
+        要读的信息，也是它全部的走位压力所在。
+
+        棋子画在**格心**，不是画在落子时球待的地方：子落在格子里，不是落在点上。
+
+        棋盘是 Match 的东西（两个望对打时共用一块，见 Match.go_board），所以这里
+        画的是**所有**子，按黑白色画。谁落的那一颗在画面上看不出来，这是有意的
+        ——围棋的棋盘本来就不写名字；真正要分清敌我的地方是判定，那里的规矩是
+        "自己的子不炸自己"。
+        """
+        board = self.match.go_board
+        if board is None:
+            return
+
+        left = round(board.origin.x + offset.x)
+        top = round(board.origin.y + offset.y)
+        right = round(board.origin.x + board.size * board.cell + offset.x)
+        bottom = round(board.origin.y + board.size * board.cell + offset.y)
+        for index in range(board.size + 1):
+            x = round(board.origin.x + index * board.cell + offset.x)
+            y = round(board.origin.y + index * board.cell + offset.y)
+            pygame.draw.line(self.screen, COLOR_BOARD_LINE, (x, top), (x, bottom),
+                             BOARD_LINE_WIDTH)
+            pygame.draw.line(self.screen, COLOR_BOARD_LINE, (left, y), (right, y),
+                             BOARD_LINE_WIDTH)
+
+        # 战场是深色的，所以两种子都得描一圈边才成形：黑子描亮边、白子描暗边。
+        # 半径按格子边长算，格子一改棋子跟着改，不会出现"棋盘变小了子还那么大"
+        radius = max(3, round(board.cell * STONE_RADIUS_RATIO))
+        for stone in board.stones:
+            center = board.center_of(stone.cell) + offset
+            point = (round(center.x), round(center.y))
+            if stone.color == STONE_BLACK:
+                fill, edge = COLOR_STONE_BLACK, COLOR_STONE_BLACK_EDGE
+            else:
+                fill, edge = COLOR_STONE_WHITE, COLOR_STONE_WHITE_EDGE
+            pygame.draw.circle(self.screen, fill, point, radius)
+            pygame.draw.circle(self.screen, edge, point, radius, STONE_EDGE_WIDTH)
 
     def draw_lasers(self, ball: Ball, offset) -> None:
         """画激光：光晕 + 外层 + 芯，三层叠出"发亮"的感觉。
@@ -821,6 +881,8 @@ class Game:
             return self.web_display(ball)
         if isinstance(skill, HammerSkill):
             return self.hammer_display(ball)
+        if isinstance(skill, GoSkill):
+            return self.go_display(ball)
         if isinstance(skill, BlinkStrikeSkill):
             return self.blink_display(ball, skill)
         if isinstance(skill, VirulenceSkill):
@@ -920,6 +982,35 @@ class Game:
             f"巨锤 |v|{speed:.0f}",
             min(1.0, speed / HAMMER_SPEED_REFERENCE),
             COLOR_HAMMER_HEAD,
+        )
+
+    def go_display(self, ball: Ball) -> tuple[str, float, tuple[int, int, int]]:
+        """望的技能条。
+
+        和激光、蛛丝、大锤一样是被动，没有冷却也没有生效时长。但它画的**不是**
+        "攒了多少"——子踩过就没了，场上那点数目一直在跳，当刻度画忽高忽低，看不出
+        任何趋势。这跟激光的线数、蛛丝的根数完全不同：那两样只增不减。
+
+        所以条上画的是**离下一手还有多久**：随倒计时从空涨到满，落一手就清零重来。
+        这是这个角色身上唯一按固定节奏动的东西，也正好是对手要判断的那件事——
+        "我现在冲过去，会不会正好赶上落子"。
+
+        场上现在有几颗子跟在后面报出来：那才是它此刻的威胁。条画节奏、字报存量，
+        两样都得有——只报节奏的话，面对一片已经铺开的棋盘，条上写的还是"还有 2 秒"，
+        看着像什么都没发生。
+        """
+        plan = ball.go_plan
+        if plan is None:
+            return ("落子", 0.0, COLOR_STONE_WHITE)
+        board = self.match.go_board
+        stones = 0 if board is None else len(board.stones)
+        ready = (
+            1.0 - max(0.0, plan.timer) / plan.interval if plan.interval > 0.0 else 1.0
+        )
+        return (
+            f"落子 {plan.timer:.1f}s · {stones}子",
+            min(1.0, ready),
+            COLOR_STONE_WHITE,
         )
 
     def blink_display(self, ball: Ball, skill: BlinkStrikeSkill

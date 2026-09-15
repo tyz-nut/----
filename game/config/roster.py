@@ -209,6 +209,32 @@
 
   毒刺**永久不封顶**（用户定的，同激光和蛛丝）。所以后期墙上会积很多根，
   对手能贴墙走的地方越来越少——这是它唯一的成长曲线，活得越久越强。
+
+- 望是**唯一一个按时间自己动的角色**：激光、蛛丝、毒刺的被动都等"撞墙"这件事
+  发生，望的棋不需要任何触发，钟一到就落一手。所以它不是"越攒越多"（那三个是），
+  而是**一直在流**——子踩过就消失，棋盘始终是半空的（见下面那条）。
+
+  它把战场划成 GO_BOARD_SIZE × GO_BOARD_SIZE 的方格（config/settings.py 里
+  那个数，用户要求可以自由调），每隔 interval 秒落一手：黑子随机落在任意一个
+  空格上，白子挨着刚落的这颗黑子（上下左右四格之一）。
+
+  interval 决定的是棋盘上**同时**有几颗子，而不是"总共能攒多少"——因为子**踩过
+  就消失**（用户定的），棋盘一直是半空的。所以望给对手的压力全在落子的节奏上：
+  间隔越短，对手每一步越容易踩上。这是它和激光 / 蛛丝 / 毒刺那三个"永久不封顶"
+  的被动最大的不同，改这个数之前先想清楚要的是哪种压力。
+
+  白子的落点规则里藏着一条**自己长出来的节奏**：四邻都占着、或者黑子落在边角上
+  没那么多邻格时，这一轮就不下白子。所以棋盘越满，白子越少——而白子是"配菜"，
+  它的用处是把黑子周围那一片也变成雷区，自己并不疼。换句话说棋盘越挤，剩下的
+  越是黑子，越狠。
+
+  黑白都炸：踩上去掉血 **+ 减速**，减速不叠加（取更狠的那一份，同蛛丝那几根）。
+  **黑子掉血多**，白子只是陪衬。
+
+  它也是唯一一个"出生只挂节奏、效果每帧由 Match 推"的被动（Match.apply_go）：
+  想调强度动的是 interval 和那三个数值，没有可以改的冷却。
+
+  自己的子不炸自己，踩上去也不消耗（同激光、蛛丝、毒刺）：子只对对手有效。
 """
 
 from ..characters import (
@@ -216,6 +242,7 @@ from ..characters import (
     BladeSkill,
     BlinkStrikeSkill,
     BoostSkill,
+    GoSkill,
     HammerSkill,
     HookSkill,
     LaserSkill,
@@ -229,6 +256,7 @@ from ..characters.assassin import PhantomAssassin
 from ..characters.fisher import Fisher
 from ..characters.hammer import Hammer
 from ..characters.laser import Laser
+from ..characters.lookout import Lookout
 from ..characters.necromancer import Necromancer
 from ..characters.normal import NormalBall
 from ..characters.samurai import Samurai
@@ -476,7 +504,7 @@ VENOM = VenomSting(
     skill=VirulenceSkill(
         name="毒发",
         cooldown=8.0,              # 一次性结算（duration = 0），放完立刻进冷却
-        base_damage=40.0,          # 0 层时也有的一份。所以不是"没毒就白放"
+        base_damage=30.0,          # 0 层时也有的一份。所以不是"没毒就白放"
         damage_per_stack=30.0,     # 每层再加这么多
         base_heal=20.0,
         heal_per_stack=15.0,
@@ -487,18 +515,52 @@ VENOM = VenomSting(
         cooldown=0.0,              # 被动用不到（ready 恒为 False），填 0 最不容易误读
         spike_size=16.0,           # 刺有多"大"：判定上等于给对方的半径加这么多。
                                    # 所以擦着墙从刺旁边过去也算扎到，不用正对着撞
-        spike_damage=40.0,         # 扎到那一下的一次性伤害（走普通命中那一套）
+        spike_damage=20.0,         # 扎到那一下的一次性伤害（走普通命中那一套）
         spike_cooldown=1.5,        # 扎完一次要等这么久才能再扎。**这个数决定
                                    # 叠毒速度**：对手在刺旁边待 6 秒，最多叠 4 层
-        poison_seconds=6.0,        # 每扎一次叠上去的那层毒活多久
-        poison_per_second=8.0,     # **每一层**每秒掉多少血，层层叠加
+        poison_seconds=20.0,        # 每扎一次叠上去的那层毒活多久
+        poison_per_second=3.0,     # **每一层**每秒掉多少血，层层叠加
     ),
     # 没有撞击伤害这一项：和渔夫、激光、武士、蜘蛛、大锤一样走基类默认的
     # 碰撞效果——正常弹开、不掉血。输出全在刺和毒发上，跟撞人没关系
 )
 
 # 顺序即右栏角色卡的排列顺序
+# ============================================================
+# 望 —— 碰撞效果无，靠把战场划成棋盘、不断落子来铺雷区
+# ============================================================
+LOOKOUT = Lookout(
+    id="lookout",
+    name="望",
+    radius=22,
+    max_hp=500,
+    description="划分棋盘 · 黑白落子",
+    # 棋盘和别的被动一样是**常驻**的，所以填在 skill 这一栏（和激光、蜘蛛、
+    # 大锤一样：它整个角色就这一个能力，没有主动技能）。装棋盘走 on_spawn，
+    # 由 Character.attach_passives 在造球时两栏一起问（见 base.py）
+    skill=GoSkill(
+        name="落子",
+        # 被动技能用不到这个数（GoSkill.ready 恒为 False，永远不会被"放"），
+        # 但 Skill 基类要求有；填 0 是最不容易误读的
+        cooldown=0.0,
+        # 每隔这么久落一手。**这是这个角色唯一的节奏旋钮**：子踩过就消失，
+        # 棋盘一直半空，所以"同时有几颗子"完全由它决定——间隔越短，对手
+        # 每一步越容易踩上。格子是 9×9 共 81 格，一手最多下两颗（黑 + 白），
+        # 所以间隔 4 秒时场上大约十来颗子，铺开的是一片稀疏的雷区
+        interval=4.0,
+        black_damage=60.0,         # 踩到黑子掉多少血。**黑子是主菜**
+        white_damage=25.0,         # 踩到白子掉多少血。白子是配菜——它的用处是
+                                   # 把黑子周围那四格也变成雷区，不是它自己疼
+        slow_seconds=2.0,          # 踩到之后慢多久。减速**不叠加**（用户定的），
+                                   # 连踩两颗是重新计时，不是双倍慢
+        slow_ratio=0.45,           # 慢多少，0.45 就是速度打五五折
+    ),
+    # 没有撞击伤害这一项：和渔夫、激光、武士、蜘蛛、大锤一样走基类默认的
+    # 碰撞效果——正常弹开、不掉血。输出全在棋盘上，跟撞人没关系
+)
+
+# 顺序即右栏角色卡的排列顺序
 CHARACTERS: tuple = (
     NORMAL, VAMPIRE, FISHER, LASER, SAMURAI, SPIDER, NECROMANCER, HAMMER,
-    PHANTOM, VENOM,
+    PHANTOM, VENOM, LOOKOUT,
 )

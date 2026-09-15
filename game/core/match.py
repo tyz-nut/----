@@ -21,11 +21,13 @@ from ..fx.effects import Effects
 from ..fx.impact import Hit
 from ..states.blink import BlinkStrike
 from ..states.darkness import Darkness
+from ..states.go_board import GoBoard
 from ..states.hook import Hook, point_from_end, polyline_length
 from ..config.settings import (
     BALL_SPAWN_MIN_GAP,
     BLINK_SWING_SPEED,
     COLOR_HOOK,
+    GO_BOARD_SIZE,
     HITSTOP_FACTOR,
     HOOK_RELEASE_SPEED,
     LATCH_RELEASE_SPEED,
@@ -80,6 +82,10 @@ class Match:
         # 它盖的是整块战场，顺带把双方的位置和血量对调（见 update_darkness）。
         # 同时只有一个：两个死灵法师同时开，不该换两次把场面换回去
         self.darkness: Darkness | None = None
+        # 望的棋盘。和 darkness 一样是**全场**的东西，不属于哪一颗球——它是
+        # "战场被划成什么样"，属于场地。两个望对打时共用这一块：各走各的落子
+        # 钟（球上的 go_plan），但子落在同一套格子上，不会两颗挤进同一格
+        self.go_board: GoBoard | None = None
         # 这一局的时间倍速。base 由左栏滑块拧，技能压的系数每帧申报一次
         self.time_scale = TimeScale(TIME_SCALE_DEFAULT)
         self.finished = False
@@ -123,13 +129,19 @@ class Match:
             # 毒是挂在**中毒的人**身上的减益，和上面那批账本不同，所以重开时
             # 两个人身上都要清——谁中过毒光看"留下了什么"是找不到的
             ball.venom = None
+            # 踩到棋子那一下的减速同理：它挂在被踩的人身上，不看"谁留了什么"
+            ball.slow = None
             ball.thrust = None
             # 闪现突袭是"技能生效中"的标记：留着它，重开之后刺客会带着一个
             # 指向上一局那个玩家的挥砍状态复活，而那个序号可能已经换人了
             ball.blink = None
-            # 刀和锤不在这里清——它们是常驻被动，跟血量一样属于"球生来就有的
-            # 东西"，由 on_spawn 在造球的时候挂上。重开时球是新建的，自然是新的
+            # 刀、锤、棋盘钟不在这里清——它们是常驻被动，跟血量一样属于"球生来
+            # 就有的东西"，由 on_spawn 在造球的时候挂上。重开时球是新建的，
+            # 自然是新的
         self.effects.clear()
+        # 棋盘放在**最后**对账：它要看着整个阵容才能决定自己该不该在场
+        # （有望才有棋盘），而且重开时得把上一局那些没主的子清掉
+        self.sync_go_board()
 
     # ---------------- 时间 ----------------
     def begin_frame(self) -> None:
@@ -216,6 +228,12 @@ class Match:
         self.apply_venoms(dt)
         # 挥砍和上面那批一样：不看谁在动。刺客已经贴上去了，对方被吸住、被
         # 钩子拖着也照样砍
+        # 棋盘也在这批里：落子**按时间**发生，不看谁在动——钟一到就落一手，
+        # 被吸住、被拖着的人照踩不误。减速排在棋盘**后面**：这一帧刚踩上去的
+        # 那一下这一帧就开始生效，晚一帧的话踩中的瞬间球还是全速（和"先扎后毒"
+        # 是同一个理由）
+        self.apply_go(dt)
+        self.apply_slows(dt)
         self.update_blinks(dt)
         if self.finished:
             return
@@ -924,6 +942,109 @@ class Match:
         if healed > 0.0:
             self.effects.heal(caster.player, caster.position, healed)
         self.judge()
+
+    # ---------------- 望的棋盘 ----------------
+    def sync_go_board(self) -> None:
+        """让棋盘和场上的人对上：有望就有棋盘，一个望都没有就没有，重开就清空。
+
+        和 NightfallSkill 调 start_darkness 是同一个分工：技能管数值，需要场地
+        的那一步留给 Match——格子的边长要从**战场边长**算出来，球不知道战场在哪。
+
+        这件事必须在阵容定下来之后做，所以它挂在 reset_outcome 的最后（那里是
+        每次选人、重开都会走到的地方），而不是望出生的时候：pick 是一个一个来的，
+        刚出生的那一个不知道自己是不是场上的**唯一**一个望，也不知道另一个位置
+        待会儿会不会也换成望。
+
+        **棋盘是共用的一块**：两个望对打时格子只有一套，两边各挂各的落子节奏
+        （球上的 go_plan），所以子会多一倍，但格子不会变成两层——两层的话两颗子
+        会落进同一格，画面上叠在一起，判定也不知道该算谁的。
+
+        重开时**只清子、不重铺**：几何（size / cell / origin）是跟着战场走的，
+        战场没变它就一模一样，重铺没有意义。真正要清的只有那些子——它们的 owner
+        是上一局的玩家序号，留着会变成没人认领的雷。
+        """
+        if not any(ball.go_plan is not None for ball in self.balls.values()):
+            self.go_board = None
+            return
+        if self.go_board is None:
+            rect = self.arena.rect
+            self.go_board = GoBoard(
+                size=GO_BOARD_SIZE,
+                cell=rect.width / GO_BOARD_SIZE,
+                origin=Vector2(rect.topleft),
+            )
+            return
+        self.go_board.stones.clear()
+
+    def apply_go(self, dt: float) -> None:
+        """结算棋盘：推进落子的钟，然后看这一帧谁踩到了子。
+
+        和光环、激光、蛛丝、毒刺同一批结算，都放在吸住/钩锁的提前返回之前——
+        被吸住、被钩着拖着的人也照样会踩到子：子画在地上，跟谁在动没关系。
+
+        **自己的子不炸自己**（同激光、蛛丝、毒刺），而且踩上去也**不消耗**它
+        ——子只对对手有效，自己的球从上面走过去不会替对手把雷排掉。所以摘除
+        排在所有权判定**后面**，顺序反过来就成了"自己走一趟替对手清场"。
+
+        一帧最多踩中一颗：球心只落在一格里，一格最多一颗子。踩到的子当场摘掉
+        （用户定的"踩过就消失"），它是地雷不是墙。
+
+        落子和踩子是同一帧里的一前一后，所以**刚落到脚下的那一颗当帧就算数**
+        ——对手正好站在那一格上时会被当场炸到，这是对的：子落在他头上。
+        """
+        board = self.go_board
+        if board is None:
+            return
+
+        for owner in self.balls.values():
+            plan = owner.go_plan
+            if plan is None or not owner.alive:
+                continue
+            if plan.tick(dt):
+                board.place(plan, owner.player)
+
+        for ball in self.balls.values():
+            if not ball.alive:
+                continue
+            cell = board.cell_of(ball.position)
+            if cell is None:
+                continue
+            stone = board.stone_at(cell)
+            if stone is None or stone.owner == ball.player:
+                continue
+            board.take(cell)
+            ball.take_damage(stone.damage)
+            ball.apply_slow(stone.slow_seconds, stone.slow_ratio)
+            # 圈炸在**格心**上，不是炸在球身上（见 Hit.at）：踩的是地上那一格，
+            # 不是自己身上。速度取受害者自己的——它是自己走上去的
+            self.effects.hits.strike(Hit.at(
+                board.center_of(cell), ball, stone.damage, speed=ball.speed,
+            ))
+        self.judge()
+
+    def apply_slows(self, dt: float) -> None:
+        """结算带时长的减速（踩到棋子）：还慢着的，压低这一帧的速度。
+
+        走的是和光环、蛛丝**同一个出口**（ball.speed_scale 取 min），区别只在
+        它自己带倒计时：踩一下是"已经发生过的事件"，人跑开了也该继续慢一会儿；
+        光环是"此刻站在圈里"，走出圈下一帧就恢复。
+
+        所以它必须在这里、在 reset_speed_scale 之后打上去，而且**每帧**都打：
+        单靠踩中的那一帧设一次是没用的，下一帧开头就被抹回 1.0 了。
+
+        取 min 而不是乘：减速**不叠加**（用户定的），和蛛丝那几根同一个处理。
+        真乘起来的话，连踩两颗就贴在地上了。
+        """
+        for ball in self.balls.values():
+            slow = ball.slow
+            if slow is None:
+                continue
+            # 先打上去再倒计时：这一帧已经生效了才算它过期。反过来写的话，
+            # 踩中的那一下会少吃一帧的减速
+            ball.speed_scale = min(ball.speed_scale, 1.0 - slow.ratio)
+            slow.remaining -= dt
+            if slow.remaining <= 0.0:
+                ball.slow = None
 
     # ---------------- 穿刺 ----------------
     def update_thrusts(self, dt: float) -> None:

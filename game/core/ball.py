@@ -16,6 +16,7 @@ from pygame.math import Vector2
 from ..states.blade import Blade
 from ..characters import Character
 from ..states.blink import BlinkStrike
+from ..states.go_board import GoPlan
 from ..states.hammer import Hammer
 from ..states.hook import Hook
 from ..states.laser import Beam, LaserField
@@ -29,8 +30,10 @@ from ..config.settings import (
     COLOR_AURA_RING,
     COLOR_DEBUG_BOX,
     COLOR_DEBUG_VECTOR,
+    COLOR_SLOW_RING,
     COLOR_VENOM_RING,
     PLAYER_COLORS,
+    SLOW_RING_PADDING,
     THRUST_MIN_EXIT_SPEED,
     VENOM_STACK_RING_MAX,
     VENOM_STACK_RING_PADDING,
@@ -58,6 +61,25 @@ class Aura:
     radius: float
     slow_ratio: float          # 圈内敌人减速比例，0.5 就是速度砍半
     drain_per_second: float    # 每秒从圈内敌人身上吸走多少血
+
+
+@dataclass
+class TimedSlow:
+    """踩到减速：**带时长**的减速，和光环那种"本帧有效"的不是一回事。
+
+    光环和蛛丝都是"每帧重新申报"的：离开圈、离开线的下一帧就恢复，因为它们
+    是**场地上的位置**决定的，人走了效果自然就没了（见 Match.begin_frame 那一套）。
+
+    这一条不一样：它来自"踩了一下"这个**已经发生过的事件**，人跑开了也该继续慢
+    一会儿。所以它必须自己带倒计时，不能被每帧的 reset_speed_scale 抹掉——
+    抹掉的话踩上去只有一帧有效，等于没有。
+
+    ratio 跟着这一份走，不在球上记一个总数：踩的时候扣多少，这一份就一直是多少，
+    中途改配置不会回头改已经踩上的那一下（和 PoisonStack 同一个道理）。
+    """
+
+    remaining: float
+    ratio: float
 
 
 @dataclass
@@ -127,6 +149,13 @@ class Ball:
     # 什么"，是"我中了什么"——和 silence 同类，是挂在球上的减益。谁中的毒就
     # 记在谁头上，跟下毒的人再无关系（那人死了毒照样走完）
     venom: list[PoisonStack] | None = None
+    # 自己身上挂着的带时长的减速（踩到棋子）。和 aura 同类，是"我身上有什么"，
+    # 不是"我留下了什么"——但它不看位置，只看时间，所以得自己带倒计时
+    slow: TimedSlow | None = None
+    # 望的落子节奏（棋盘钟 + 落出来的子是什么成色）。和 blade / hammer 同类：
+    # 常驻的东西，出生时装上，之后一直在。**子不在球上**——棋盘是 Match 的
+    # （见 Match.go_board），这里只有"多久落一手"
+    go_plan: GoPlan | None = None
     # 当前朝向（单位向量）。速度被清零时还得靠它决定加速那一截往哪走
     heading: Vector2 = field(default_factory=lambda: Vector2(1.0, 0.0))
 
@@ -416,6 +445,26 @@ class Ball:
             damage_per_speed_sq=damage_per_speed_sq,
         )
 
+    def start_go(self, interval: float, black_damage: float, white_damage: float,
+                 slow_seconds: float, slow_ratio: float) -> None:
+        """挂上落子的节奏（望的常驻被动）。
+
+        和 start_blade / start_hammer 同类：出生时挂一次，之后它自己一直在。
+        **棋盘不在这里**——棋盘是 Match 的（见 Match.go_board），那是"战场被划成
+        什么样"，球不知道战场在哪。这里挂的只是"多久落一手、落出来是什么成色"。
+
+        第一手的钟拧满（从 interval 开始倒数，而不是 0）：开局两颗球是随机撒在
+        场上的，子也是随机落的，开局那一下两边撞上纯属白送。
+        """
+        self.go_plan = GoPlan(
+            interval=interval,
+            black_damage=black_damage,
+            white_damage=white_damage,
+            slow_seconds=slow_seconds,
+            slow_ratio=slow_ratio,
+            timer=interval,
+        )
+
     def start_thrust(self, match, speed: float, distance: float,
                      damage: float) -> None:
         """朝敌人锁死一个方向冲出去。
@@ -539,6 +588,31 @@ class Ball:
             damage_per_second=damage_per_second,
         ))
 
+    def apply_slow(self, seconds: float, ratio: float) -> None:
+        """踩到减速：**不叠加**（用户定的）。
+
+        已经在慢着的时候取**更狠的那一份**，不是两份乘起来——乘起来就是指数级
+        地慢，连踩两颗几乎贴在原地（蛛丝的减速也是这么处理的，见 apply_webs：
+        取最狠的一根，不相乘）。
+
+        比例一样时把时长**取长的那个**，也就是"连踩两颗是重新计时，不是变成
+        双倍时长"。比例比手上这份小的减速**整颗白踩**，连时长也不续：不然一颗
+        轻的会把一颗重的顶掉，越踩越慢反倒变成越踩越快。
+
+        写的是球上的状态，**每帧生效由 Match.apply_slows 负责**——这里只负责
+        "记下来"，和 aura 那套分工一样。
+        """
+        current = self.slow
+        if current is None:
+            self.slow = TimedSlow(remaining=seconds, ratio=ratio)
+            return
+        if ratio < current.ratio:
+            return
+        if ratio == current.ratio:
+            current.remaining = max(current.remaining, seconds)
+            return
+        self.slow = TimedSlow(remaining=seconds, ratio=ratio)
+
     def silence(self) -> None:
         """封住技能。这是一条**通用状态**，谁都能挂——吸住会挂它，以后别的技能
         （晕眩、禁魔、破防……）也可以挂它，球这边不关心是谁挂的。
@@ -635,6 +709,23 @@ class Ball:
         radius = self.radius + VENOM_STACK_RING_PADDING
         width = max(2, min(stacks, VENOM_STACK_RING_MAX))
         pygame.draw.circle(surface, COLOR_VENOM_RING, center, radius, width)
+
+    def draw_slow(self, surface: pygame.Surface, offset: Vector2) -> None:
+        """画减速：球外面套一圈冷蓝。
+
+        比中毒那圈（半径 + 5）再往外一点（半径 + 11），两圈能同时看见——一颗球
+        完全可能既中着毒又被棋子炸慢。和中毒一样画在球**之前**，它是套在球面上
+        的，盖上去像球变胖了。
+
+        没有"层数"这回事（减速不叠加），所以这圈的粗细是固定的，只报个"在慢着"。
+        还剩多久画不出来，那是技能条上的事（见 app.go_display）。
+        """
+        if self.slow is None:
+            return
+        center = self.center_at(offset)
+        pygame.draw.circle(
+            surface, COLOR_SLOW_RING, center, self.radius + SLOW_RING_PADDING, 2
+        )
 
     def draw(self, surface: pygame.Surface, offset: Vector2) -> None:
         center = self.center_at(offset)

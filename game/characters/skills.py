@@ -492,6 +492,68 @@ class BladeSkill(Skill):
 
 
 @dataclass(frozen=True)
+class GoSkill(Skill):
+    """棋盘：把战场划成方格，每隔一段时间在空格里落一手棋——先黑后白。
+
+    和刀、锤子同属**常驻被动**（ready 钉死成 False，起点是 on_spawn，不占技能
+    条），但它是这几样里唯一**自己按时间动**的：刀和锤子只在自己被推进的时候
+    转，撞不撞得上是对方的事；而这一样不需要任何触发，钟一到就落子。所以它是
+    全场唯一一个"不看场上发生了什么、只因为时间到了就改变场地"的东西。
+
+    落一手的规则（用户定的）：
+
+    - 黑子随机落在**任意一个空格**上。
+    - 白子落在**刚落的这颗黑子**上下左右四格之一。
+    - 四邻都占着、或者黑子落在边角上没那么多邻格时，**这一轮就不下白子**——
+      所以棋盘越满，白子越少、黑子（伤害高的那种）占比越高。
+    - 黑白都炸：踩上去掉血 **+ 减速**，减速不叠加。**黑子掉血更多。**
+
+    踩上去的子**就没了**（用户定的"踩过就消失"）。所以棋子是地雷不是墙，棋盘
+    一直是半空的、望得不停地补——这正是它和激光、蛛丝、毒刺那三个"永久不封顶"
+    的被动最大的不同：那三样是**越积越多**，这一样是**一直在流**。它给对手的
+    压力不来自"攒了多少"，来自落子的节奏。
+
+    自己的子不炸自己（同激光、蛛丝、毒刺），踩上去也不会消耗——子只对对手
+    有效。
+
+    **棋盘本身不在这里**：它是 Match 的（见 Match.go_board），因为它是"战场
+    被划成什么样"，属于场地。填在球上的是**节奏**（Ball.go_plan），两个望对打
+    时共用一块棋盘、各走各的钟。
+    """
+
+    interval: float = 4.0           # 每隔几秒落一手。**这个数决定对手的压力**：
+                                    # 越短，棋盘上同时存在的子越多
+    black_damage: float = 60.0      # 踩到黑子掉多少血
+    white_damage: float = 25.0      # 踩到白子掉多少血。比黑子轻——白子是配菜，
+                                    # 它的作用是把黑子周围那片格子也变成雷区
+    slow_seconds: float = 2.0       # 踩到之后慢多久（黑白一样）
+    slow_ratio: float = 0.45        # 慢多少，0.45 就是速度打五五折。
+
+    def ready(self, ball: Ball, match: Match) -> bool:
+        return False
+
+    def activate(self, ball: Ball, match: Match) -> None:
+        """常驻被动没有"放"这个动作。真的被调到了说明哪里写错了。"""
+        raise NotImplementedError("棋盘是被动技能，不该被 activate")
+
+    def on_spawn(self, ball: Ball, match: Match) -> None:
+        """出生时把落子节奏挂在球上。
+
+        **棋盘不在这里铺**：那是 Match 的事（见 Match.sync_go_board）——棋盘是
+        "战场被划成什么样"，格子边长要从战场边长算出来，球不知道战场在哪。
+        而且铺棋盘得等**两个玩家都选完**才算数（只有一个人有望才该有棋盘），
+        出生这一个是早的。
+        """
+        ball.start_go(
+            interval=self.interval,
+            black_damage=self.black_damage,
+            white_damage=self.white_damage,
+            slow_seconds=self.slow_seconds,
+            slow_ratio=self.slow_ratio,
+        )
+
+
+@dataclass(frozen=True)
 class ThrustSkill(Skill):
     """穿刺：朝敌人锁死一个方向，用极快的速度直线冲一段距离。
 
