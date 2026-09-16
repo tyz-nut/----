@@ -21,14 +21,32 @@
 
 所以望的压力不来自"攒了多少"，来自**落子的节奏**——间隔越短，对手每一步
 越容易踩上。
+
+## 一手是一串
+
+黑子和它的四颗白子不是同时出现的：黑子先落，四颗白子以**短得多**的间隔一颗接
+一颗跟上，落完才进冷却（用户定的）：
+
+    黑 ─0.2s─ 白 ─0.2s─ 白 ─0.2s─ 白 ─0.2s─ 白 ──[冷却]── 黑 ...
+
+所以两次"间隔"不是同一个数：白子之间是 white_interval，四颗落完之后才隔
+interval 起下一手。白子的格子因此在**黑子落地那一刻**就定下来、存在
+GoPlan.pending 里等着一颗一颗兑现（见 GoBoard.play）——隔了哪怕几帧再算，也
+算不出"当初挨着它的是哪四格"了。
 """
 
 from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from pygame.math import Vector2
+
+if TYPE_CHECKING:
+    # 只在类型检查时 import：ball.py 在运行时是 import 这个模块的（Ball 上挂着
+    # go_plan / go_board 这一路），真 import 进来就绕成一个圈了
+    from ..core.ball import Ball
 
 # 棋子的两种颜色。用字符串而不是 Enum：它只用来比相等（画成黑的还是白的）
 # 和挑数值，没有别处要遍历或排序，和 arena 那四个墙名同一个理由
@@ -46,11 +64,16 @@ class GoStone:
     owner 是**谁落的**，不是"这颗子是黑的还是白的"：自己的子不炸自己
     （同激光、蛛丝、毒刺），所以每颗子都得记着找谁收账。黑白的区别只在
     damage 那个数上，已经烤进去了。
+
+    owner 存的是**那一颗球**，不是玩家序号。"自己的子不炸自己"问的是**哪一边**
+    （Match.same_side），所以比的是 owner.player —— 望自己召出来的东西（如果
+    以后有）踩上去也算自己一边。存球而不是存序号，是因为落子的那一刻手里就有
+    球，而序号回头还得再查一次；顺带也躲开了"序号在一场里只有两个值"这个坑。
     """
 
     cell: tuple[int, int]   # 落在第几列、第几行（从 0 开始）
     color: str              # BLACK / WHITE
-    owner: int              # 落下它的玩家序号。自己的子不炸自己
+    owner: Ball             # 落下它的那一颗球。自己的子不炸自己一边
     damage: float           # 踩到掉多少血
     slow_seconds: float     # 踩到减速多久
     slow_ratio: float       # 减速比例，0.4 就是速度打六折
@@ -140,16 +163,36 @@ class GoBoard:
             if 0 <= c < self.size and 0 <= r < self.size
         ]
 
-    def place(self, plan: GoPlan, owner: int) -> None:
-        """落一手：先黑后白，白子挨着刚落的黑子。
+    def play(self, plan: GoPlan, owner: Ball) -> None:
+        """落**一颗**子——这一拍轮到谁就落谁。
 
-        规则（用户定的）：
+        望的一手不是"啪一下五颗一起出现"：黑子先落，四颗白子随后**很快地一颗接
+        一颗**跟上（用户定的），一颗落完才轮到下一颗：
 
-        - 黑子随机落在**任意一个空格**上。
-        - 白子落在**刚落的这颗黑子**上下左右四格之一。
-        - 四邻都占着、或者黑子落在边角上没那么多邻格时，**这一轮就不下白子**
-          ——所以棋盘越满，白子越少，黑子（伤害高的那种）占比自然越来越高。
-          这不是补丁，是这一条规则自己长出来的节奏。
+            黑 ─0.2s─ 白 ─0.2s─ 白 ─0.2s─ 白 ─0.2s─ 白 ──[冷却]── 黑 ...
+
+        所以"间隔"有两份：白子之间是 white_interval（很短，看起来是唰唰唰唰连
+        着铺开的一圈），四颗落完之后才隔 interval 这个冷却起下一手。两份间隔都
+        在 GoPlan 上，这里只负责落子，拧钟是 plan.arm 的事。
+
+        白子的格子**在黑子落下的那一刻就定好了**（存进 plan.pending）：白子必须
+        挨着这颗黑子，而黑子是这一刻落的，之后棋盘会变，再算就算不出"当初那四格"
+        了。
+        """
+        if plan.pending:
+            self.drop_white(plan.pending.pop(0), plan, owner)
+        else:
+            self.drop_black(plan, owner)
+        # 落完之后按**剩下的队列**重新拧钟：还有白子没落就还是短间隔，空了就是
+        # 这一手完了，转成长冷却
+        plan.arm()
+
+    def drop_black(self, plan: GoPlan, owner: Ball) -> None:
+        """落黑子，顺手把它的四邻记成待落的四颗白子。
+
+        黑子随机落在**任意一个空格**上；四邻里已经有子的那几格不进队列——白子
+        不叠在子上面。边角上邻格本来就少，队列自然短，一颗都排不上就是"这一轮
+        不下白子"。
 
         棋盘满了就什么都不做。这在实际对局里到不了（子被踩掉就腾出格子），
         只是"没有空格可挑"这件事总得有个交代，不然 random.choice 会当场炸。
@@ -170,16 +213,24 @@ class GoBoard:
             slow_ratio=plan.slow_ratio,
         ))
 
-        # 邻格里**还没被占的**那些。白子不下在已有子上，也不下在黑子自己那格
-        # （neighbors 本来就不含自己）
-        open_neighbors = [
+        # 四邻里**还没被占的**那些，一格一颗。neighbors 不含黑子自己那格，所以
+        # 黑子不会被自己的白子盖掉
+        plan.pending = [
             cell for cell in self.neighbors(black_cell)
             if self.stone_at(cell) is None
         ]
-        if not open_neighbors:
+
+    def drop_white(self, cell: tuple[int, int], plan: GoPlan,
+                   owner: Ball) -> None:
+        """落一颗白子。格子是黑子落下时定好的，轮到它这一拍才真落下来。
+
+        隔了几拍，那一格可能已经被别人占了（比如对面也是个望），那就跳过——
+        白子不叠在子上面，和排进队列时是同一条规矩。
+        """
+        if self.stone_at(cell) is not None:
             return
         self.stones.append(GoStone(
-            cell=random.choice(open_neighbors),
+            cell=cell,
             color=WHITE,
             owner=owner,
             damage=plan.white_damage,
@@ -199,27 +250,57 @@ class GoPlan:
     的时候转（Match 每帧推一下），而这个钟一到就要求落子。所以它是这几样里
     唯一一个"不看场上发生了什么，只因为时间到了就产生效果"的东西。
 
-    timer 是**离下一手还有几秒**，从 interval 往下走。不记"已经过了多久"：
+    timer 是**离下一颗子还有几秒**，从当前的 gap 往下走。不记"已经过了多久"：
     条上画的是"还有多久"，玩家要判断的是"我现在冲过去会不会正好赶上落子"。
+
+    pending 是**这一手还没落完的白子格**（见 GoBoard.play）。它把"一手"从一个
+    瞬间摊成了五拍：黑子落下时把四邻排进队列，之后每一拍弹出一格。所以它为空
+    就等于"这一手落完了，下一颗该起新的一手（黑子）"——技能条上那个"下一颗是
+    黑是白"就是看它空不空（见 app.go_display）。
+
+    **两种间隔**（用户定的）：同一手里面白子和白子之间隔 white_interval（很短，
+    四颗白子是"唰唰唰唰"连着落下来的），一手落完（最后一颗白子落地）之后才隔
+    interval 这个**冷却**起下一手。所以一轮的长度是
+
+        4 × white_interval + interval
+
+    而不是 5 × interval。gap 记的就是**这一次**倒计时拧了多长——两种间隔交替
+    出现，条上的进度得拿对应的那一份当分母才画得准。
     """
 
-    interval: float         # 每隔几秒落一手
+    interval: float         # 一手落完之后隔几秒起下一手（冷却）
+    white_interval: float   # 同一手里白子之间隔几秒
     black_damage: float     # 黑子踩上去掉多少血
     white_damage: float     # 白子踩上去掉多少血（比黑子轻）
     slow_seconds: float     # 踩到减速多久（黑白一样）
     slow_ratio: float       # 减速比例（黑白一样）
-    timer: float = 0.0      # 离下一手还有几秒
+    timer: float = 0.0      # 离下一颗子还有几秒
+    gap: float = 0.0        # 这一次倒计时是从几秒开始拧的（画进度条用）
+    pending: list[tuple[int, int]] = field(default_factory=list)   # 待落的白子格
+
+    def arm(self) -> None:
+        """按"下一颗是什么"把钟拧上。
+
+        队列里还排着白子 -> 下一颗是白的，隔 white_interval；队列空了 -> 这一手
+        落完了，隔 interval 起下一手。拧钟只在这一个地方做，因为"下一颗是黑是白"
+        这件事只有队列知道（见 GoBoard.play），散在别处早晚会对不上。
+        """
+        self.gap = self.white_interval if self.pending else self.interval
+        self.timer = self.gap
 
     def tick(self, dt: float) -> bool:
-        """走一步钟，返回**这一帧该不该落一手**。
+        """走一步钟，返回**这一帧该不该落一颗子**。
 
-        落完之后钟要重新拧满，而且必须是"赋值"而不是"加上一个 interval"：
-        一帧 dt 有可能比 interval 还大（卡顿之后主循环把它截断在 MAX_FRAME_TIME，
-        也就是 0.25 秒），累加的话那 0.25 秒会被算成好几手，一帧之内啪地落满
-        半个棋盘。赋值等于"欠下的那点不要了"，最多晚一帧，不会多落。
+        拧钟必须是"赋值"而不是"加上一个 gap"：一帧 dt 有可能比 white_interval
+        还大（卡顿之后主循环把它截断在 MAX_FRAME_TIME，也就是 0.25 秒，而白子
+        之间只隔 0.2 秒），累加的话一帧能被算成好几拍，四颗白子会挤在一帧里
+        同时冒出来。赋值等于"欠下的那点不要了"，最多晚一帧，不会多落。
+
+        这里拧的那一次只是**预拧**（按落子之前的队列猜），真落了子之后
+        GoBoard.play 会再拧一次——那时候队列已经变了，那一次才是准的。
         """
         self.timer -= dt
         if self.timer > 0.0:
             return False
-        self.timer = self.interval
+        self.arm()
         return True

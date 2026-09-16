@@ -70,7 +70,7 @@ class Hammer:
     head_radius: float = 0.0      # 锤头多大。判定用的是它，不是球半径
     damage_per_speed_sq: float = 0.0   # 伤害 = 相对速度² × 这个系数
     swept: float = 0.0            # 这一圈已经抡过的弧度
-    struck: set[int] = field(default_factory=set)   # 这一圈已经砸过谁
+    struck: set[int] = field(default_factory=set)   # 这一圈已经砸过的球（存 Ball.uid）
 
     @property
     def direction(self) -> Vector2:
@@ -133,14 +133,16 @@ class Hammer:
         """
         return self.head_center(center).distance_to(point) <= self.head_radius + radius
 
-    def consume(self, player: int) -> bool:
-        """这一圈还没砸过这个玩家就记上一笔。返回**该不该结算这一锤**。
+    def consume(self, uid: int) -> bool:
+        """这一圈还没砸过这颗球就记上一笔。返回**该不该结算这一锤**。
 
-        和刀那句是同一个道理：砸中了先问一句，问过的人不加第二次，等 advance
+        和刀那句是同一个道理：砸中了先问一句，问过的不加第二次，等 advance
         转满一圈把名单清空，才能再砸。打不飞的目标（霸体）会一直待在锤子的道
         上，全靠这一条兜着。
+
+        记的是球的 uid 而不是玩家序号，理由和刀那边一样（见 Ball.uid）。
         """
-        if player in self.struck:
+        if uid in self.struck:
             return False
-        self.struck.add(player)
+        self.struck.add(uid)
         return True

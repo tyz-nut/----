@@ -22,7 +22,9 @@ from ..characters import (
     VirulenceSkill,
     WebSkill,
 )
+from ..states.fish import Fish
 from ..states.go_board import BLACK as STONE_BLACK
+from ..states.hook import visible_path
 from ..config.settings import (
     BAR_FILL_MUTE,
     BAR_TEXT,
@@ -32,7 +34,9 @@ from ..config.settings import (
     BLADE_EDGE_WIDTH,
     BLADE_HUB_RADIUS,
     BLADE_WIDTH,
+    BLINK_SWING_SPEED,
     BOARD_LINE_WIDTH,
+    COLOR_ARENA_FILL,
     COLOR_BG,
     COLOR_BEAM,
     COLOR_BEAM_CORE,
@@ -40,9 +44,13 @@ from ..config.settings import (
     COLOR_BLADE,
     COLOR_BLADE_EDGE,
     COLOR_BOARD_LINE,
+    COLOR_FISH,
+    COLOR_FISH_EYE,
     COLOR_HAMMER_HEAD,
     COLOR_HAMMER_HEAD_EDGE,
     COLOR_HAMMER_SHAFT,
+    COLOR_FISH,
+    COLOR_FISH_EYE,
     COLOR_HOOK,
     COLOR_HOOK_ROPE,
     COLOR_LASER_NODE,
@@ -82,11 +90,16 @@ from ..config.settings import (
     FONT_RIGHT_TITLE,
     FONT_SMALL,
     FONT_TITLE,
+    FISH_EYE_RATIO,
+    FISH_FIN_RATIO,
     FPS,
     HAMMER_HEAD_EDGE_WIDTH,
     HAMMER_SHAFT_WIDTH,
     HAMMER_SPEED_REFERENCE,
     HOOK_RADIUS,
+    KNIGHT_HP_BAR_GAP,
+    KNIGHT_HP_BAR_HEIGHT,
+    KNIGHT_HP_BAR_WIDTH,
     LASER_NODE_RADIUS,
     MAX_FRAME_TIME,
     PANEL_PADDING,
@@ -94,6 +107,9 @@ from ..config.settings import (
     PHANTOM_SLASH_SPREAD,
     PHANTOM_SLASH_STEPS,
     PHANTOM_SLASH_WIDTH,
+    PHANTOM_TRAIL_COUNT,
+    PHANTOM_TRAIL_FADE,
+    PHANTOM_TRAIL_LAG,
     PLAYER_NAMES,
     STONE_EDGE_WIDTH,
     STONE_RADIUS_RATIO,
@@ -117,6 +133,19 @@ from ..fx.effects import Effects
 from .layout import build_layout
 from ..core.match import Match
 from .widgets import Button, Slider, draw_bar
+
+
+def _fade_toward(color, ratio: float):
+    """把颜色往战场底色上混，ratio 1 是原色、0 就是完全沉进底色。
+
+    这是"半透明"在 draw.lines 上的替身：直线是直接往屏幕上写像素的，画不出
+    alpha，而每画一道残影就新建一张 SRCALPHA 面太亏。混底色得到的观感和真
+    透明度几乎一样——除非底下压着网格线，那一点差别看不出来。
+    """
+    return tuple(
+        round(base + (target - base) * ratio)
+        for base, target in zip(COLOR_ARENA_FILL, color)
+    )
 
 
 class State(Enum):
@@ -279,7 +308,7 @@ class Game:
         self.button_start.enabled = selecting and self.match.both_picked()
         self.button_pause.enabled = self.state is not State.SELECT and not self.match.finished
         self.button_pause.label = "继续" if self.state is State.PAUSED else "暂停"
-        self.button_restart.enabled = bool(self.match.balls)   # 场上没角色就无所谓重开
+        self.button_restart.enabled = bool(self.match.units)   # 场上没角色就无所谓重开
         self.button_debug.enabled = True
         self.button_debug.active = self.debug
 
@@ -303,7 +332,7 @@ class Game:
 
     def restart(self) -> None:
         """保留已选角色，重新随机位置与动量，回到选择阶段等「开始」。"""
-        if not self.match.balls:
+        if not self.match.units:
             return
         self.match.restart()
         self.state = State.SELECT
@@ -400,46 +429,60 @@ class Game:
         previous_clip = self.screen.get_clip()
         self.screen.set_clip(self.layout.arena)
 
+        # 下面这一批走的是 combatants()——两颗主球 **+ 骑士**，不是 balls。
+        # 骑士是完整的球，这些层它一样要过一遍（它也会中毒、被减速、被刀砍到）。
+        # 至于激光、蛛丝、毒刺、刀、锤那些"谁留下了什么"的层，骑士三样都没有，
+        # 拿它去问一句自然什么都不画——所以这里不挑，统一走 combatants()，
+        # 免得以后给骑士加了什么就漏画一层
+        #
         # 光环先画：它是半透明的，盖在球上会把球糊掉
         # 棋盘画在最底下：它是**地面上的刻度**，别的东西都从它上面过去。
         # 比光环还早，所以减速罩、激光、蛛丝、球全压在它上面
         self.draw_go_board(offset)
-        for ball in self.match.balls.values():
+        for ball in self.match.combatants():
             ball.draw_aura(self.screen, offset)
         # 激光画在球**下面**：它是画在墙上的背景物，压在球上会像割过球面
-        for ball in self.match.balls.values():
+        for ball in self.match.combatants():
             self.draw_lasers(ball, offset)
         # 蛛丝也画在球下面：它从蜘蛛身上出发、一路绷到墙上，压在球上会像
         # 一根穿过球体的棍子。画在激光之后，免得被线多的激光盖住
-        for ball in self.match.balls.values():
+        for ball in self.match.combatants():
             self.draw_webs(ball, offset)
         # 毒刺也画在球下面：它是钉在墙上的东西，球贴着墙压过去的时候该盖住它
-        for ball in self.match.balls.values():
+        for ball in self.match.combatants():
             self.draw_spikes(ball, offset)
-        for ball in self.match.balls.values():
+        for ball in self.match.combatants():
             self.draw_hook(ball, offset)
-        for ball in self.match.balls.values():
+        for ball in self.match.combatants():
             self.draw_thrust_trail(ball, offset)
         self.draw_latch_link(offset)
         # 中毒的圈和光环一样在球**之前**画：它是套在球面上的，盖上去像球变胖了
-        for ball in self.match.balls.values():
+        for ball in self.match.combatants():
             ball.draw_venom(self.screen, offset)
         # 减速那一圈比中毒那圈更靠外，两圈能同时看见——一颗球完全可能既中着
         # 毒又被棋子炸慢
-        for ball in self.match.balls.values():
+        for ball in self.match.combatants():
             ball.draw_slow(self.screen, offset)
-        for ball in self.match.balls.values():
+        for ball in self.match.combatants():
             ball.draw(self.screen, offset)
+        # 骑士的血条压在球**上面**：它画在球顶上，被球盖住就没意义了
+        for unit in self.match.summons():
+            self.draw_knight_hp(unit, offset)
         # 刀画在球**上面**：刀根扎在球心附近，压在球下就只剩外面半截，
         # 看着像飘在旁边的另一件东西
-        for ball in self.match.balls.values():
+        for ball in self.match.combatants():
             self.draw_blade(ball, offset)
-        for ball in self.match.balls.values():
+        for ball in self.match.combatants():
             self.draw_hammer(ball, offset)
         # 挥砍弧画在球**上面**：刀光本来就该盖过球面，而且它标的是"砍得到
         # 哪里"，被球挡住一半就看不出够不够得着
-        for ball in self.match.balls.values():
+        for ball in self.match.combatants():
             self.draw_blink_slash(ball, offset)
+        # 鱼画在所有球**上面**：它不是场上的东西（不在 combatants 里），是一条
+        # 冲着人去的活物，被球盖住就看不见它拐弯追人了。钩锁的绳画在下面是因为
+        # 它从渔夫身上出来，鱼没有这层牵挂
+        for ball in self.match.combatants():
+            self.draw_fish(ball, offset)
         self.match.effects.draw(self.screen, offset)
         self.draw_latch_label(offset)
 
@@ -453,7 +496,7 @@ class Game:
         self.draw_darkness()
 
         if self.debug:
-            for ball in self.match.balls.values():
+            for ball in self.match.combatants():
                 ball.draw_debug(
                     self.screen, self.fonts[FONT_SMALL], DEBUG_VELOCITY_SCALE, offset
                 )
@@ -465,6 +508,26 @@ class Game:
         self.draw_player_info()
         self.draw_result()
         pygame.display.flip()
+
+    def draw_knight_hp(self, knight: Ball, offset) -> None:
+        """骑士头顶那条小血条。
+
+        底栏那两条血条是**玩家本人的**（Match.mains 里正好两个），骑士不在那儿——
+        但它们**只有被打死才消失**（用户定的），所以"还剩多少"是场上最要紧的
+        一个数：满血和残血在画面上是同一个样子，没有这条就完全判断不出该不该
+        让它们去撞。
+
+        颜色用队色压暗，和底栏那条同色，一眼能认出是谁的兵。条不长（24px），
+        所以不写字——30 点血的球上挤一个字反而看不清。
+        """
+        center = knight.center_at(offset)
+        rect = pygame.Rect(0, 0, KNIGHT_HP_BAR_WIDTH, KNIGHT_HP_BAR_HEIGHT)
+        rect.midbottom = (
+            center[0],
+            center[1] - knight.radius - KNIGHT_HP_BAR_GAP,
+        )
+        muted = tuple(round(c * BAR_FILL_MUTE) for c in knight.color)
+        draw_bar(self.screen, rect, knight.hp_ratio, muted)
 
     def draw_buttons(self) -> None:
         """画所有按钮。
@@ -558,17 +621,65 @@ class Game:
 
         画在球的**下面**（和吸住那条连线同理）：折线是从渔夫身上出来的，
         压在球上会像一根穿过球的棍子。
+
+        绳子画的是 **visible_path**（去掉已经被收回来的那一截），不是整条 path：
+        收线时钩尖一路往回走，绳子得跟着一起短，否则看着像钩子在原地不动、线
+        自己缩回去（用户报的就是这个）。飞出去那一路上 pulled 一直是 0，
+        visible_path 原样返回整条，所以两种阶段共用这一段代码。
         """
         hook = ball.hook
         if hook is None:
             return
-        points = [(round(ball.position.x + offset.x), round(ball.position.y + offset.y))]
-        points += [
-            (round(point.x + offset.x), round(point.y + offset.y)) for point in hook.path
-        ]
+        rope = [Vector2(ball.position)] + visible_path(hook.path, hook.pulled)
+        points = [(round(point.x + offset.x), round(point.y + offset.y)) for point in rope]
         if len(points) >= 2:
             pygame.draw.lines(self.screen, COLOR_HOOK_ROPE, False, points, 2)
-        pygame.draw.circle(self.screen, COLOR_HOOK, points[-1], HOOK_RADIUS)
+        # 钩尖用它自己的 position 而不是 rope 的末端：收线时两者是同一个点
+        # （reel_hook 每帧都把 position 摆在 point_from_end 处），但线被收光的那
+        # 一瞬 rope 会是空的，用末端会当场 IndexError
+        tip = (round(hook.position.x + offset.x), round(hook.position.y + offset.y))
+        pygame.draw.circle(self.screen, COLOR_HOOK, tip, HOOK_RADIUS)
+
+    def draw_fish(self, ball: Ball, offset) -> None:
+        """画钩空之后放出来的那些鱼：一个圆身子 + 一条尾巴 + 一只眼。
+
+        朝向取 velocity 而不是画一个正圆：**它会自己拐弯追人**，这是它和一颗
+        普通小球最大的区别，看不见朝向就等于看不见它在追谁。转向有上限这一点
+        也是靠这个朝向读出来的——画成正圆的话"绕弧"就完全看不出来了。
+
+        身子用鱼自己的 radius 画（体型随机，大鱼看着就该更吓人），眼和尾巴都按
+        体型取比例，所以大小两档长得是一个样子。
+
+        画的是**一列**：放鱼那一刻技能就收招进冷却了，冷却走完能再甩一钩，
+        所以水里同时游着几条是常有的事（见 Ball.fishes）。
+        """
+        if not ball.fishes:
+            return
+        for fish in ball.fishes:
+            self.draw_one_fish(fish, offset)
+
+    def draw_one_fish(self, fish: Fish, offset) -> None:
+        """画一条鱼。拆出来只是因为一次要画好几条，懒得把循环套进整段绘制里。"""
+        center = Vector2(fish.position.x + offset.x, fish.position.y + offset.y)
+        radius = max(2.0, fish.radius)
+        heading = fish.velocity
+        heading = heading / heading.length() if heading.length() > 1e-9 else Vector2(1.0, 0.0)
+
+        # 尾巴：从身子边缘往**反方向**甩出去的一个三角，画在身子之前（压在底下）
+        back = center - heading * radius
+        side = Vector2(-heading.y, heading.x) * radius * 0.7
+        tail = back - heading * radius * FISH_FIN_RATIO
+        pygame.draw.polygon(self.screen, COLOR_FISH, [
+            (round(back.x + side.x), round(back.y + side.y)),
+            (round(tail.x), round(tail.y)),
+            (round(back.x - side.x), round(back.y - side.y)),
+        ])
+        pygame.draw.circle(self.screen, COLOR_FISH, (round(center.x), round(center.y)),
+                           round(radius))
+        # 眼睛偏在朝向前方：一只眼就够读出朝向，两只眼在这么小的圆上会糊成一团
+        eye = center + heading * radius * 0.45 + side * 0.45
+        pygame.draw.circle(self.screen, COLOR_FISH_EYE, (round(eye.x), round(eye.y)),
+                           max(1, round(radius * FISH_EYE_RATIO)))
 
     def draw_webs(self, ball: Ball, offset) -> None:
         """画蛛丝：从蜘蛛现在的位置拉一条线到墙上的锚点，锚点画成一个小点。
@@ -653,15 +764,43 @@ class Game:
         pygame.draw.circle(self.screen, COLOR_HAMMER_HEAD_EDGE, center,
                            round(hammer.head_radius), HAMMER_HEAD_EDGE_WIDTH)
 
+    def slash_points(self, center, base: float, swing: float, reach: float):
+        """挥砍的弧在这一相位下是哪几个点（折线）。画本体和画残影共用这一份。
+
+        弧扫过的角度从 -SPREAD 到 +SPREAD，位置跟着 swing 走。所以它是
+        "一刀一刀地扫"，不是一直在同一个位置亮着。摆动的相位会在两头各停一下
+        （三角波），看起来就是"挥出去、收回来"。
+
+        弧是折线拼的：pygame 没有画圆弧的函数，用一条粗线把若干段连起来。
+        """
+        # 三角波 0→1→0，把 swing 的线性增长折成来回挥
+        phase = (swing % math.tau) / math.tau
+        sweep = 1.0 - abs(2.0 * phase - 1.0)
+        start = base - PHANTOM_SLASH_SPREAD
+        current = start + 2.0 * PHANTOM_SLASH_SPREAD * sweep
+
+        points = []
+        for index in range(PHANTOM_SLASH_STEPS + 1):
+            angle = start + (current - start) * index / PHANTOM_SLASH_STEPS
+            points.append((round(center[0] + math.cos(angle) * reach),
+                           round(center[1] + math.sin(angle) * reach)))
+        return points
+
     def draw_blink_slash(self, ball: Ball, offset) -> None:
-        """画闪现突袭：闪现那一下的圈 + 挥砍的弧光。
+        """画闪现突袭：闪现那一下的圈 + 挥砍的弧光 + 弧的残影。
 
         弧的**半径就是判定用的 reach**，和锤子按 head_radius 画是同一条原则：
         玩家看到的范围就是真会挨砍的范围。
 
-        弧扫过的角度从 -SPREAD 到 +SPREAD，相位跟着 strike.swing 走。所以它是
-        "一刀一刀地扫"，不是一直在同一个位置亮着。摆动的相位会在两头各停一下
-        （三角波），看起来就是"挥出去、收回来"。
+        残影是**同一道弧在几个更早的相位上的样子**，一道比一道淡、比一道细。
+        因为弧的位置本来就是 swing 的纯函数（见 slash_points），把 swing 往回
+        拨一点就能画出"它刚才在哪"——不需要另外记账本，也不会和真实位移对不上，
+        弧本来就没有位移，转的是相位。
+
+        淡用**往战场底色上混**来做，不是真透明度：draw.lines 画在屏幕上是直接
+        写像素的，没有 alpha 可用，为一道残影每帧新建一张 SRCALPHA 面也不值当。
+        代价是残影压在战场网格线上的那一小段会把网格盖掉——残影本来就细又暗，
+        看不出来。
         """
         strike = ball.blink
         if strike is None:
@@ -671,24 +810,21 @@ class Game:
         facing = strike.facing
         base = math.atan2(facing.y, facing.x)
 
-        # 三角波 0→1→0，把 swing 的线性增长折成来回挥
-        phase = (strike.swing % math.tau) / math.tau
-        sweep = 1.0 - abs(2.0 * phase - 1.0)
-        start = base - PHANTOM_SLASH_SPREAD
-        current = start + 2.0 * PHANTOM_SLASH_SPREAD * sweep
+        # 残影从最老的画到最新的，本体最后压在最上面
+        for index in range(PHANTOM_TRAIL_COUNT, 0, -1):
+            fade = 1.0 - PHANTOM_TRAIL_FADE * index / PHANTOM_TRAIL_COUNT
+            lag = index * PHANTOM_TRAIL_LAG * BLINK_SWING_SPEED
+            points = self.slash_points(center, base, strike.swing - lag,
+                                       strike.reach)
+            width = max(1, round(PHANTOM_SLASH_WIDTH * fade))
+            pygame.draw.lines(self.screen,
+                              _fade_toward(COLOR_PHANTOM, fade), False,
+                              points, width)
 
-        # 弧是折线拼的：pygame 没有画圆弧的函数，用一条粗线把若干段连起来
-        steps = PHANTOM_SLASH_STEPS
-        points = []
-        for index in range(steps + 1):
-            angle = start + (current - start) * index / steps
-            x = center[0] + math.cos(angle) * strike.reach
-            y = center[1] + math.sin(angle) * strike.reach
-            points.append((round(x), round(y)))
-        if len(points) >= 2:
-            pygame.draw.lines(self.screen, COLOR_PHANTOM, False, points,
-                              PHANTOM_SLASH_WIDTH)
-            pygame.draw.lines(self.screen, COLOR_PHANTOM_CORE, False, points, 1)
+        points = self.slash_points(center, base, strike.swing, strike.reach)
+        pygame.draw.lines(self.screen, COLOR_PHANTOM, False, points,
+                          PHANTOM_SLASH_WIDTH)
+        pygame.draw.lines(self.screen, COLOR_PHANTOM_CORE, False, points, 1)
 
         if strike.flashing:
             # 闪现那一圈：亮度和大小都跟着剩余时间退。圈画在球面上方一点，
@@ -808,7 +944,7 @@ class Game:
         else:
             status = STATE_LABEL[self.state]
             if self.state is State.SELECT and not self.match.both_picked():
-                status += f"  {len(self.match.balls)}/{len(PLAYER_NAMES)}"
+                status += f"  {len(self.match.mains())}/{len(PLAYER_NAMES)}"
         self.screen.blit(title.render(status, True, COLOR_TEXT), self.layout.status_pos)
 
         # 左栏下方：快捷键说明
@@ -840,7 +976,8 @@ class Game:
     def draw_player_info(self) -> None:
         """底栏：每个玩家的血条与技能状态。"""
         small = self.fonts[FONT_SMALL]
-        for player, ball in sorted(self.match.balls.items()):
+        for ball in self.match.mains():
+            player = ball.player
             hp_rect = self.layout.hp_bars[player]
             muted = tuple(round(c * BAR_FILL_MUTE) for c in ball.color)
             draw_bar(self.screen, hp_rect, ball.hp_ratio, muted)
@@ -896,6 +1033,10 @@ class Game:
                 if not hook.reeling:
                     return ("抛钩 · 飞行中", 1.0, COLOR_SKILL_ACTIVE)
                 return ("抛钩 · 收线", hook.pull_progress, COLOR_SKILL_ACTIVE)
+            # **没有鱼那一支**：鱼一放出来技能就收招了（用户定的"召出鱼技能就可以
+            # 进入冷却了"），所以鱼在水里游的时候 skill_active 是假的，条上如实
+            # 走的是下面那段冷却。鱼本身画在场上（见 draw_fish），不缺读得出来
+            # 的东西——体型、朝哪游、还剩多久，看球比看条清楚
             return (
                 f"{skill.name} {ball.skill_active_remaining:.1f}s",
                 ball.skill_active_remaining / ball.skill_active_total,
@@ -991,9 +1132,17 @@ class Game:
         "攒了多少"——子踩过就没了，场上那点数目一直在跳，当刻度画忽高忽低，看不出
         任何趋势。这跟激光的线数、蛛丝的根数完全不同：那两样只增不减。
 
-        所以条上画的是**离下一手还有多久**：随倒计时从空涨到满，落一手就清零重来。
-        这是这个角色身上唯一按固定节奏动的东西，也正好是对手要判断的那件事——
-        "我现在冲过去，会不会正好赶上落子"。
+        所以条上画的是**离下一颗子还有多久**：随倒计时从空涨到满，落一颗就清零
+        重来。这是这个角色身上唯一按固定节奏动的东西，也正好是对手要判断的那件事
+        ——"我现在冲过去，会不会正好赶上一颗"。
+
+        分母取的是 plan.gap 而不是 interval：一段倒计时可能是在等白子（短），也
+        可能是在等下一手（长），拿错的那一份当分母，短的那几拍会一直贴着满格
+        不动，看着像卡住了。
+
+        开头那两个字报的是**下一颗是黑是白**（见 GoBoard.play）：黑子比白子疼
+        得多，冲着哪一颗去完全是两回事。挑队列空不空就是问这个——队列里还排着
+        白子，下一颗就是白的；队列空了，下一颗起新手，黑子。
 
         场上现在有几颗子跟在后面报出来：那才是它此刻的威胁。条画节奏、字报存量，
         两样都得有——只报节奏的话，面对一片已经铺开的棋盘，条上写的还是"还有 2 秒"，
@@ -1004,12 +1153,16 @@ class Game:
             return ("落子", 0.0, COLOR_STONE_WHITE)
         board = self.match.go_board
         stones = 0 if board is None else len(board.stones)
-        ready = (
-            1.0 - max(0.0, plan.timer) / plan.interval if plan.interval > 0.0 else 1.0
-        )
+        gap = plan.gap
+        ready = 1.0 - max(0.0, plan.timer) / gap if gap > 0.0 else 1.0
+        # 夹一下：拧钟的地方保证 timer ≤ gap，正常跑不到越界那一支，但条上的
+        # 进度是直接拿去画像素的，负数会画到场外去
+        ready = max(0.0, min(1.0, ready))
+        # 队列里还有白子没落完 -> 下一颗是白的；空了 -> 该起新手，黑子
+        coming = "白子" if plan.pending else "黑子"
         return (
-            f"落子 {plan.timer:.1f}s · {stones}子",
-            min(1.0, ready),
+            f"{coming} {plan.timer:.1f}s · {stones}子",
+            ready,
             COLOR_STONE_WHITE,
         )
 

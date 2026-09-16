@@ -10,8 +10,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from pygame.math import Vector2
+
+if TYPE_CHECKING:
+    # 只在类型检查时 import：ball.py 在运行时是 import 这个模块的（Ball 上挂着
+    # hook 这一栏），真 import 进来就绕成一个圈了
+    from ..core.ball import Ball
 
 
 def polyline_length(path: list[Vector2]) -> float:
@@ -19,6 +25,38 @@ def polyline_length(path: list[Vector2]) -> float:
     return sum(
         (path[index + 1] - path[index]).length() for index in range(len(path) - 1)
     )
+
+
+def visible_path(path: list[Vector2], pulled: float) -> list[Vector2]:
+    """折线上**还剩在外面**的那一段：从起点一直画到"离末端 pulled 像素"处。
+
+    pulled = 0 就是整条（还没开始收）。收线时钩尖一路往回走，绳子要跟着一起
+    短——只用 point_from_end 挪钩尖是不够的，那样线还画着原来的全长，看着像
+    一条绳子自己往回缩、而钩子挂在原地不动（用户报的就是这个）。
+
+    从末端往回量，和 point_from_end 是同一个方向：收线本来就是倒着走这条路的。
+    """
+    total = polyline_length(path)
+    cut = total - pulled
+    if cut <= 0.0 or not path:
+        return []
+    if len(path) == 1:
+        return [Vector2(path[0])]
+
+    points = [Vector2(path[0])]
+    walked = 0.0
+    for index in range(1, len(path)):
+        start, end = path[index - 1], path[index]
+        segment = (end - start).length()
+        if segment <= 1e-9:
+            continue
+        if walked + segment >= cut:
+            # 这一段被截断了：只画到 cut 那一点
+            points.append(start + (end - start) * ((cut - walked) / segment))
+            return points
+        points.append(Vector2(end))
+        walked += segment
+    return points
 
 
 def point_from_end(path: list[Vector2], distance: float) -> Vector2:
@@ -51,6 +89,35 @@ def point_from_end(path: list[Vector2], distance: float) -> Vector2:
     return Vector2(path[0])
 
 
+@dataclass(frozen=True)
+class FishSpec:
+    """钩空之后那条鱼怎么长、怎么游、放不放得出来。
+
+    单独一个类而不是七个字段摊在 Hook 上：这一组数在放钩的那一刻整份抄下来，
+    之后一路只读，所以打包成不可变的一小份最省事——Hook 上多一个字段，
+    cast_hook 的入参和调用方就都短一截。
+
+    体型在 [min_size, max_size] 之间**均匀**随机，伤害和持续时间都正比于体型
+    （用户定的"根据大小造成伤害与持续时间"），所以只需要两个比例，不需要再给
+    伤害和时长各配一套上下限。
+    """
+
+    min_size: float = 9.0             # 体型下限（像素半径）
+    max_size: float = 24.0            # 体型上限
+    damage_per_size: float = 3.0      # 每 1 像素体型咬多少血
+    duration_per_size: float = 0.12   # 每 1 像素体型活多少秒
+    speed: float = 480.0              # 直线游速（像素/秒）
+    turn_rate: float = 4.2            # 每秒最多转多少弧度，决定它绕不绕得过急弯
+    # 满舵转弯时掉多少速（0.86 = 只剩一成四）。**这个不是手感参数**：它决定这条鱼
+    # 的转弯半径 speed×(1-turn_slow)/turn_rate，那个半径必须小于咬合距离
+    # （鱼半径 + 敌人半径），否则鱼会绕着敌人画圈、一辈子咬不着（见 Fish.steer）
+    #
+    # 所以它和 speed 是一对、得一起调：speed 涨多少，这里的转弯半径就跟着涨多少。
+    # 当前 480×0.14÷4.2 ≈ 16 像素，最小的一档咬合距离是 21（小鱼 r9 + 骑士 r12）
+    turn_slow: float = 0.86
+    fail_chance: float = 0.3          # 钩空之后连鱼都召唤不出来的概率
+
+
 @dataclass
 class Hook:
     """一条甩出去的钩锁。
@@ -77,7 +144,15 @@ class Hook:
     pull_speed: float = 800.0       # 收线速度（像素/秒）
     drain_per_second: float = 30.0  # 收线期间每秒从敌人身上吸走多少血
     reel_gap: float = 8.0           # 拉到身前时两球之间留的空隙
-    target: int | None = None       # 钩中的玩家序号；None = 还在飞
+    # 鱼线总共多长（像素）。**折线总长**，不是直线距离——弹了三次墙就是三段
+    # 加起来。走到头还没钩到人就收场（见 Match.hook_missed）：鱼线是有限长的，
+    # 甩不出去就是甩不出去。这个数比战场的对角线还长（600×600 的场，对角线
+    # 约 849），所以现在等于"想去哪就去哪"，弹几次墙总能到
+    max_length: float = 900.0
+    # 钩空之后那条鱼的参数。抄在钩锁上而不是回头问角色：钩锁可能飞好几秒，
+    # 这几秒里角色参数被改了（用户调数值就是这样），天上那条得按放出去时的规矩走
+    fish_spec: FishSpec = field(default_factory=lambda: FishSpec())
+    target: Ball | None = None      # 钩中的那一颗球；None = 还在飞
     pulled: float = 0.0             # 收线已经拉回来多少像素
     total: float = 0.0              # 收线全程多少像素（钩中时才定得下来）
 

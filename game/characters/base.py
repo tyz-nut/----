@@ -27,6 +27,9 @@ class CollisionOutcome:
 
     - damage_to_other > 0：这一下伤对方这么多血。想按什么算由角色自己定，
       CollisionOutcome 只收算好的数（普通小球按移速平方算，见 normal.py）。
+    - damage_to_self > 0：这一撞**自己也掉**这么多血（国王和它的骑士用的就是
+      这一项：撞上去伤敌八百、自损一千）。它和 damage_to_other 各算各的，
+      互不相干——同一次撞击里两边本来就有各自的主张，这里是己方主张里的第二笔。
     - grab_seconds > 0：抓住对方。**弹开**被顶替掉（双方都不弹开，改成粘成
       一团一起飞 + 持续吸取），但 damage_to_other 照常结算——抓取只顶替弹开，
       不免除伤害。
@@ -37,6 +40,7 @@ class CollisionOutcome:
     """
 
     damage_to_other: float = 0.0
+    damage_to_self: float = 0.0          # 这一撞自己掉多少血
     grab_seconds: float = 0.0            # > 0 表示吸住对方这么久
     grab_drain_per_second: float = 0.0   # 吸住期间每秒吸取对方多少血
     silences: bool = False               # 是否封住对方的技能

@@ -9,6 +9,8 @@ app 只负责界面与主循环，不参与任何判定。
 
 from __future__ import annotations
 
+import math
+import random
 from dataclasses import dataclass
 
 from pygame.math import Vector2
@@ -21,6 +23,7 @@ from ..fx.effects import Effects
 from ..fx.impact import Hit
 from ..states.blink import BlinkStrike
 from ..states.darkness import Darkness
+from ..states.fish import Fish
 from ..states.go_board import GoBoard
 from ..states.hook import Hook, point_from_end, polyline_length
 from ..config.settings import (
@@ -59,8 +62,8 @@ class Latch:
     它会按各自的加成分量正确地减回去（两只球的加速不一样也各算各的）。
     """
 
-    grabber: int             # 抓人的一方（玩家序号）
-    victim: int              # 被绑住的一方
+    grabber: Ball            # 抓人的那一颗球
+    victim: Ball             # 被绑住的那一颗
     velocity: Vector2        # 合体飞行速度（基础速度，不含加速倍率）
     remaining: float         # 还剩几秒松口
     drain_per_second: float  # 每秒从 victim 身上吸走多少血
@@ -75,7 +78,26 @@ class Match:
         # 特效总线。Match 只往里喊"这里发生了什么"，不碰任何绘制代码；
         # 不传就是一个默认的（扣血数字用 pygame 默认字体）。app 会传一个带中文字体的进来
         self.effects = effects if effects is not None else Effects()
-        self.balls: dict[int, Ball] = {}   # 玩家序号 -> 该玩家的球
+        # 场上**所有球**：两颗主球 + 所有召唤物（国王的骑士），一张表。
+        #
+        # 原来这里是 dict[int, Ball]（玩家序号 -> 那颗球），把召唤物挡在门外，
+        # 理由是"全场有一大半的机制照着正好两颗球写的"。那是真的，但代价是
+        # 每一处"这颗球是哪一边的"都要回头查序号，而序号在召唤物身上是**不唯一**
+        # 的——国王和他的骑士共用一个序号，于是每次"找出对面那颗球"都可能摸到
+        # 一颗骑士，散落各处的 `target is not owner` 全得改成按边比。
+        #
+        # 现在反过来：**身份就是球本身**。指向某颗球的地方（钩锁的目标、吸住的
+        # 双方、刺客砍的人、棋子归谁）直接存那颗球，不再存一个还要回查的号。
+        # player 只剩一个用途——**哪一边**（颜色、敌我、胜负、伤害数字的颜色）。
+        #
+        # 主球和召唤物的区分落在 Ball.summoned 上：胜负、换位、重开这些"只对
+        # 玩家本人成立"的事按它筛（见 mains）。
+        self.units: list[Ball] = []
+        # 召唤物之间的接触标记。和 touching 是同一个东西的两份：touching 是
+        # **整场一个**bool，因为主球只有两颗，一场只可能有一对。召唤物一来就有
+        # 好几对，共用一个 bool 会让其中一对贴上压制住其它所有对的结算。
+        # 存的是两颗球的 uid（见 Ball.uid），小号在前
+        self.summon_contacts: set[tuple[int, int]] = set()
         self.touching = False              # 上一帧两球是否已经贴在一起
         self.latch: Latch | None = None    # 当前粘在一起的两球
         # 正在降临的黑夜。和 latch 一样是**全场**的东西，不属于哪一颗球——
@@ -91,28 +113,88 @@ class Match:
         self.finished = False
         self.winner: int | None = None     # finished=True 且 winner=None 表示平局
 
+    # ---------------- 谁在场上 ----------------
+    def combatants(self) -> list[Ball]:
+        """场上所有**作战单位**：两颗主球 + 所有召唤物。
+
+        每次调用都现拼一个新列表，不是把 self.units 本身递出去。这一点是有意的：
+        调用方全是 `for target in self.combatants()` 这种遍历，而遍历途中**伤亡是
+        会发生的**（judge 一判就把死掉的骑士从 units 里摘走）。给的是快照，就不
+        存在"边遍历边删表"这件事；代价只是各处的循环里那几句 `if not target.alive`
+        还得留着——快照里可能躺着一颗刚被打死的球。
+
+        顺序是主球在前、召唤物在后。有几处对顺序是有依赖的（direction_to_opponent
+        取"对方那颗主球"来瞄准），主球排前面正好让技能优先冲着对方本人去，
+        而不是被路过的骑士带偏。
+        """
+        return list(self.units)
+
+    def summons(self) -> list[Ball]:
+        """场上所有召唤物（当前只有国王的骑士）。"""
+        return [ball for ball in self.units if ball.summoned]
+
+    def mains(self) -> list[Ball]:
+        """场上那两颗**玩家本人的球**，按玩家序号排。
+
+        胜负、黑夜换位、重开、选人问的都是它：这几件事只对"玩家选的那个角色
+        本人"成立，跟召唤物没关系（骑士死光不算输）。按序号排是为了让"第一颗
+        是玩家 1、第二颗是玩家 2"这个顺序稳定——换位、穿刺瞄准都等着解包它。
+        """
+        return sorted((ball for ball in self.units if not ball.summoned),
+                      key=lambda ball: ball.player)
+
+    def main_of(self, player: int) -> Ball | None:
+        """某个玩家本人的那颗球。还没选角色时为 None。"""
+        for ball in self.units:
+            if not ball.summoned and ball.player == player:
+                return ball
+        return None
+
+    @staticmethod
+    def same_side(owner: Ball, target: Ball) -> bool:
+        """这两颗球是不是一边的。
+
+        判的是 player（"站哪一边"）而不是"是不是同一颗球"。主球时代这两个问法
+        等价——一颗球一个玩家，`target is owner` 就够了——所以各处写的都是后
+        者。多了骑士就不等价了：国王的骑士和国王是同一个 player、却是两颗球。
+
+        这个函数替掉的是那些 `if target is owner` 的排除（光环、激光、蛛丝、
+        毒刺、刀、锤子、穿刺）。替换之后那些地方的意思从"自己不留神伤到自己"
+        变成"这一边不留神伤到自己人"——用户定的"骑士碰到自己不会互相造成伤害"
+        是同一条规矩，只不过那是撞，这是技能。
+        """
+        return target.player == owner.player
+
     # ---------------- 组装 ----------------
     def both_picked(self) -> bool:
-        return all(player in self.balls for player in range(len(PLAYER_NAMES)))
+        return len(self.mains()) == len(PLAYER_NAMES)
 
     def pick(self, player: int, character: Character) -> None:
         """给某个玩家换上角色，在场上随机位置满血生成。"""
-        self.balls[player] = self._spawn(player, character, self._others(player))
+        self.units = [
+            ball for ball in self.units if ball.summoned or ball.player != player
+        ]
+        self.units.append(self._spawn(player, character, self._others(player)))
         self.reset_outcome()
 
     def restart(self) -> None:
         """保留已选角色，重新随机位置与动量；血量、技能、胜负全部复位。"""
         placed: list[Ball] = []
-        rebuilt: dict[int, Ball] = {}
-        for player in sorted(self.balls):
-            ball = self._spawn(player, self.balls[player].character, placed)
-            rebuilt[player] = ball
-            placed.append(ball)
-        self.balls = rebuilt
+        rebuilt: list[Ball] = []
+        for ball in self.mains():
+            fresh = self._spawn(ball.player, ball.character, placed)
+            rebuilt.append(fresh)
+            placed.append(fresh)
+        # 只留下重建的两颗主球：上一局的召唤物跟着 reset_outcome 一起勾销
+        self.units = rebuilt
         self.reset_outcome()
 
     def reset_outcome(self) -> None:
         self.touching = False
+        self.summon_contacts.clear()
+        # 召唤物和场上那些账本一样要一笔勾销：它是上一局那个国王召出来的，
+        # 换角色、重开之后场上不该还飞着别人的兵
+        self.units = [ball for ball in self.units if not ball.summoned]
         self.latch = None
         self.darkness = None
         self.finished = False
@@ -120,9 +202,10 @@ class Match:
         # 绑住被一笔勾销，挂在人身上的沉默、飞在半路的钩锁、画在墙上的激光、
         # 绷出去的蛛丝也得跟着走，否则重开之后有一方会带着莫名其妙的封印、
         # 渔夫会定在原地动不了、上一局切出来的那些线还会继续割人
-        for ball in self.balls.values():
+        for ball in self.units:
             ball.unsilence()
             ball.hook = None
+            ball.fishes = None
             ball.lasers = None
             ball.webs = None
             ball.spikes = None
@@ -156,10 +239,12 @@ class Match:
         self.time_scale.reset()
         self.effects.reset_screen()
 
-        for ball in self.balls.values():
+        for ball in self.combatants():
             blink = ball.blink
             if blink is not None and blink.flashing:
-                self.time_scale.push(f"blink:{ball.player}", blink.slow_factor)
+                # 键按**球的编号**发，不按玩家序号：序号在一场里只保证"两边不同"，
+                # 而这张表是"这一个减速是谁在压"的名册，一颗球一条才说得通
+                self.time_scale.push(f"blink:{ball.uid}", blink.slow_factor)
                 self.effects.set_vignette(blink.flash_ratio)
 
         darkness = self.darkness
@@ -172,14 +257,24 @@ class Match:
             self.time_scale.push("hitstop", HITSTOP_FACTOR)
 
     def opponent(self, ball: Ball) -> Ball | None:
-        """另一颗球。场上只剩自己时是 None（正常对局走不到，但技能别因此炸掉）。"""
-        for other in self.balls.values():
-            if other is not ball:
-                return other
+        """对面**本人的那颗球**——不是"随便另一颗球"。
+
+        召唤物不算数：瞄准、穿刺、闪现这一路"我要冲谁"的决定冲的都是对方本人，
+        骑士是挡在路上的东西、不是目标（见 direction_to_opponent）。场上只剩
+        自己时是 None（正常对局走不到，但技能别因此炸掉）。
+        """
+        for other in self.units:
+            if other.summoned or other.player == ball.player:
+                continue
+            return other
         return None
 
     def _others(self, player: int) -> list[Ball]:
-        return [ball for index, ball in self.balls.items() if index != player]
+        """别的玩家本人的球。排出生点用——召唤物不参与，它们不占位置上的坑。"""
+        return [
+            ball for ball in self.units
+            if not ball.summoned and ball.player != player
+        ]
 
     def _spawn(self, player: int, character: Character, others: list[Ball]) -> Ball:
         position = self.arena.random_spawn_point(
@@ -211,7 +306,7 @@ class Match:
         # 减速是"本帧有效"的，所以每帧都先把折扣抹回 1.0，再由光环重新打上去。
         # 必须在这里无条件做，不能等 apply_auras 里去管：放光环的球可能中途死掉，
         # 那条还原路径就断了，折扣会永久留在对方身上，越叠越慢直到停住。
-        for ball in self.balls.values():
+        for ball in self.combatants():
             ball.reset_speed_scale()
         self.apply_auras(dt)
         # 激光和光环同一批结算：都是"场上的东西每帧对球做什么"，而且都不关心
@@ -235,6 +330,8 @@ class Match:
         self.apply_go(dt)
         self.apply_slows(dt)
         self.update_blinks(dt)
+        # 鱼和上面那批同一批：放出去就自己游，渔夫被吸住、被拖着也照样追人
+        self.update_fishes(dt)
         if self.finished:
             return
 
@@ -260,10 +357,12 @@ class Match:
             self.keep_inside(victim)
             return
 
-        for ball in self.balls.values():
+        for ball in self.combatants():
             # 甩钩锁的人定在原地，被钩回来的人由折线拖着走，正在冲的那位由
             # 穿刺的方向和速度决定位置——三种都不按各自的动量位移。
-            # 但计时器照走，否则技能冷却和生效时长会被冻住
+            # 但计时器照走，否则技能冷却和生效时长会被冻住。
+            # 骑士三种都不是（它不甩钩、不被钩、不穿刺），所以一律走 update——
+            # 它按自己的动量飞，这就是"向周围发射出去"的全部实现
             if ball.frozen or ball is victim or ball.thrust is not None:
                 ball.tick(dt)
             else:
@@ -271,10 +370,16 @@ class Match:
 
         self.cast_ready_skills()
         self.resolve_collision()
+        # 胜负已分就不再碰骑士：那一下已经打完了，多结算一轮只会让尸体再挨一下
+        if not self.finished:
+            self.resolve_summons_collisions()
         if self.latch is not None:
             # 这一帧刚吸上。不能再走各自的撞墙判定——那会把粘住的一对拆开，
             # 但这一对的边界还是得守（见 correct_latch_walls）
             self.correct_latch_walls()
+            # 骑士不参与吸住，而上面那个 return 会把它们一起带走——少了这一句，
+            # 一场几秒的吸住里骑士会直接穿墙飞到场外
+            self.keep_summons_inside()
             return
 
         # 撞墙放在最后：球球分离可能把某颗球推进墙里，让墙来做最终裁决
@@ -295,23 +400,40 @@ class Match:
         分胜负那一帧也整条走这个分支：那一帧没有"反弹"可言了，只要别让球挂在
         墙里就行（钩锁可能正好把人拖到墙上拖死、或者有人死在墙边）。
         """
-        for ball in self.balls.values():
-            if ball.frozen or ball is victim or self.finished:
-                self.arena.clamp_inside(ball.position, ball.radius)
-                continue
-            hit = self.arena.bounce_off_walls(ball)
-            if hit is not None:
-                self.effects.bounce(hit.point, ball.color, ball.speed)
-                # 撞墙这件事光有几何还不够，被动技能要听这一声（激光、蛛丝、
-                # 毒刺）。主动技能走 cast_ready_skills，被动技能走这里。
-                # 问的是**角色**不是它的 skill ——被动不一定填在 skill 那一栏，
-                # 见 Character.on_wall_hit
-                ball.character.on_wall_hit(ball, self, hit.point, hit.side)
+        for ball in self.combatants():
+            self.keep_one_inside(ball, victim)
+
+    def keep_summons_inside(self) -> None:
+        """吸住期间**只**守召唤物的边界。
+
+        吸住那一分支是提前返回的（主球的位置由连体位移接管了，不能再按各自的
+        反弹判定），走不到 keep_inside。召唤物不参与吸住，所以它得在那边单独补
+        一次——不然一场几秒的吸住里，骑士会照着自己的动量一路穿出墙外。
+
+        没有 victim 这一项：被吸住的一定是主球，召唤物永远不是。
+        """
+        for unit in self.summons():
+            self.keep_one_inside(unit, None)
+
+    def keep_one_inside(self, ball: Ball, victim: Ball | None) -> None:
+        """守一颗球的边界。上面的判定拆出来，是为了让吸住那一分支也能单独
+        拿它来管召唤物（见 keep_summons_inside）。"""
+        if ball.frozen or ball is victim or self.finished:
+            self.arena.clamp_inside(ball.position, ball.radius)
+            return
+        hit = self.arena.bounce_off_walls(ball)
+        if hit is not None:
+            self.effects.bounce(hit.point, ball.color, ball.speed)
+            # 撞墙这件事光有几何还不够，被动技能要听这一声（激光、蛛丝、
+            # 毒刺）。主动技能走 cast_ready_skills，被动技能走这里。
+            # 问的是**角色**不是它的 skill ——被动不一定填在 skill 那一栏，
+            # 见 Character.on_wall_hit
+            ball.character.on_wall_hit(ball, self, hit.point, hit.side)
 
     # ---------------- 钩锁 ----------------
     def update_hooks(self, dt: float) -> None:
         """推进场上所有钩锁：在飞的接着飞，在收线的接着拉。"""
-        for ball in self.balls.values():
+        for ball in self.combatants():
             hook = ball.hook
             if hook is None:
                 continue
@@ -331,6 +453,17 @@ class Match:
         后者在墙外面（最多出去 speed×dt），收线时敌人会跟着在墙外走一截。
         折回场内之后的位置则是新一段的起点，两段在拐角处正好接上。
         """
+        # 鱼线还剩多长。折线每帧正好长 speed*dt（弹墙只是把这一段折成两截，
+        # 总长不变），所以"这一帧会不会把线走完"是可以提前算出来的
+        speed = hook.velocity.length()
+        line_left = hook.max_length - polyline_length(hook.path)
+        ran_out = False
+        if speed > 1e-9 and speed * dt >= line_left:
+            # 这一帧只走到线的尽头，不多走：多走的那一截要么得砍掉折线的拐角
+            # （绳子会穿过墙），要么钩尖会冲到线外去（画出来收不回来）
+            dt = max(0.0, line_left / speed)
+            ran_out = True
+
         start = Vector2(hook.position)
         hook.position += hook.velocity * dt
         target = Vector2(hook.position)
@@ -342,17 +475,164 @@ class Match:
         else:
             hook.path[-1] = Vector2(hook.position)
 
-        for other in self.balls.values():
-            if other is owner or not other.alive:
+        # 钩得到**谁**：对面本人的球，也包括对面召出来的骑士——骑士和普通球
+        # 一样会中招（用户定的），钩锁没有理由单把它漏掉。
+        #
+        # 排除条件从"是不是自己"（other is owner）换成"是不是自己一边"：
+        # 主球时代这两问等价，有了骑士就不等价了——钩到自家的骑士会被拖着走，
+        # 而钩锁是渔夫唯一的输出，白甩一次等于罚站
+        for other in self.combatants():
+            if other is owner or self.same_side(owner, other) or not other.alive:
                 continue
             if (other.position - hook.position).length() > other.radius:
                 continue
             self.hook_hit(owner, other, hook)
             return
 
+        if ran_out:
+            self.hook_missed(owner, hook)
+
+    def hook_missed(self, owner: Ball, hook: Hook) -> None:
+        """钩空了：鱼线放完也没咬到人，改成在钩子那儿放一条鱼出去追。
+
+        用户定的这一条把"甩空"从纯粹的惩罚变成了**另一种结果**：宁可钩空也不
+        要白甩一次，放出来的那条鱼会自己去追人。鱼的体型是随机的，咬得重不重、
+        活多久全看这一下运气。
+
+        **有一定概率连鱼都放不出来**（用户定的 fail_chance）：这是同一个随机
+        里面更差的那一档，钩空 + 召唤失败才是真的白甩一次。两种结果都走
+        finish_skill 收尾——技能总得结束、冷却总得开始走，不然渔夫会永远定在
+        那里（钩锁是他唯一的输出，卡住一次就再也动不了了）。
+
+        放出来的鱼是从**钩子当前位置**出发的（不是渔夫身上）：这就是"从钩子处
+        召唤"，钩子飞到哪儿，鱼就从哪儿下水。
+
+        **放鱼这一刻技能就收招、冷却就开始走**（用户定的"召唤出鱼之后技能就
+        可以进入冷却了"）。所以顺序是：先 finish_skill 再 cast_fish，反过来
+        不行——finish_skill 会清 hook（这里正好要清），但鱼要是先挂上去了、
+        再走一遍收招，就得额外小心别把它一起清掉。先收招再放鱼，鱼是收招之后
+        才落到水里的东西，跟技能已经没关系了。
+        """
+        spec = hook.fish_spec
+        owner.finish_skill()
+        if random.random() < spec.fail_chance:
+            return
+        # 收招之后才放：这条鱼是"放出去就不管了"的账本（见 Ball.fishes），
+        # 水里游多久、咬不咬得到，都不再牵动渔夫那条技能——冷却已经在上面
+        # 那一刻开始走了，鱼只是还在那儿游着
+        self.cast_fish(owner, Vector2(hook.position), hook)
+
+    def cast_fish(self, owner: Ball, position: Vector2, hook: Hook) -> None:
+        """在 position 放一条鱼，体型随机，朝最近的敌人游过去。
+
+        数值（半径、伤害、活多久）都在这一刻按体型算好烤进 Fish 里——同
+        WebAnchor / GoStone，之后调角色参数不会把水里已有的那条鱼一起改掉。
+
+        伤害和持续时间都**正比于体型**（用户定的"根据大小造成伤害与持续时间"）：
+        一个随机半径乘两个比例，两样东西就都跟着大小走了，不需要再各配一套
+        上下限。所以"大鱼"的价值是双份的——咬得更重，而且有更多时间追上第二口。
+
+        初始速度直接朝目标：鱼是放出来追人的，一上来先原地转一圈找方向很蠢。
+        目标就是最近的那个敌人（含对面的骑士），找不到就朝渔夫的朝向游。
+
+        **往 fishes 里追加，不是覆盖**：技能收招之后冷却就在走，冷却一走完
+        渔夫就能再甩第二钩，那时候水里这条可能还没咬完。单槽的话第二次放鱼会
+        把它顶掉，等于凭空少咬一口（和 webs / spikes 同一个账本口径）。
+        """
+        spec = hook.fish_spec
+        size = random.uniform(spec.min_size, spec.max_size)
+        target = self.nearest_enemy(owner, position)
+        if target is not None:
+            offset = target.position - position
+            heading = offset.normalize() if offset.length_squared() > 1e-12 \
+                else Vector2(owner.heading)
+        else:
+            heading = Vector2(owner.heading)
+
+        lifetime = size * spec.duration_per_size
+        if owner.fishes is None:
+            owner.fishes = []
+        owner.fishes.append(Fish(
+            position=Vector2(position),
+            velocity=heading * spec.speed,
+            radius=size,
+            damage=size * spec.damage_per_size,
+            remaining=lifetime,
+            total=lifetime,
+            speed=spec.speed,
+            turn_rate=spec.turn_rate,
+            turn_slow=spec.turn_slow,
+        ))
+
+    def nearest_enemy(self, owner: Ball, position: Vector2) -> Ball | None:
+        """离 position 最近的敌人（含对面的骑士）。没有则 None。"""
+        best = None
+        best_distance = 0.0
+        for unit in self.combatants():
+            if not unit.alive or self.same_side(owner, unit):
+                continue
+            distance = (unit.position - position).length_squared()
+            if best is None or distance < best_distance:
+                best, best_distance = unit, distance
+        return best
+
+    # ---------------- 鱼 ----------------
+    def update_fishes(self, dt: float) -> None:
+        """推进场上所有的鱼：追人、咬一口、到点消失。
+
+        和光环、激光、蛛丝同一批结算，都放在吸住/钩锁的提前返回之前——鱼是
+        放出去自己游的，渔夫被吸住、被钩着拖着它也照样在追人。
+
+        咬中就走：鱼是**一发**东西，不是一颗站得住的球（见 states/fish.py）。
+        所以这里一咬中就把它清掉，不像骑士那样留下来接着打。
+
+        判定用"鱼心和敌人圆面挨上"（半径和），和钩锁撞人的口径一致。
+
+        鱼没了的三条路（主人死了 / 到点了 / 咬到了）**都只是把它从账本上划掉**，
+        **不碰技能**：放鱼那一刻技能就已经收招、冷却就已经在走了（见
+        hook_missed）。这里再调一次 finish_skill 的话等于把冷却重新拨满，
+        冷却会被这条鱼无限往后推——收招过一次的技能不能再收第二次。
+
+        按 `list(...)` 遍历是因为循环体里会从 fishes 里删鱼，直接迭代原表会
+        跳元素。同一帧可能有好几条鱼在游（冷却短的时候前一发还没咬完）。
+        """
+        for owner in self.combatants():
+            if not owner.fishes:
+                continue
+            if not owner.alive:
+                # 主人没了，他放的鱼跟着作废（不然会替一颗死球接着咬人）
+                owner.fishes = None
+                continue
+
+            for fish in list(owner.fishes):
+                fish.remaining -= dt
+                if fish.remaining <= 0.0:
+                    owner.fishes.remove(fish)
+                    continue
+
+                target = self.nearest_enemy(owner, fish.position)
+                if target is not None:
+                    fish.steer(target.position, dt)
+
+                for victim in self.combatants():
+                    if not victim.alive or self.same_side(owner, victim):
+                        continue
+                    reach = fish.radius + victim.radius
+                    if (victim.position - fish.position).length() > reach:
+                        continue
+                    victim.take_damage(fish.damage)
+                    # 环炸在**鱼身上**（见 Hit.at）：咬人的是这条鱼，不在任何一颗球上
+                    self.effects.hits.strike(Hit.at(
+                        fish.position, victim, fish.damage,
+                        speed=(fish.velocity - victim.effective_velocity).length(),
+                    ))
+                    owner.fishes.remove(fish)
+                    break
+        self.judge()
+
     def hook_hit(self, owner: Ball, victim: Ball, hook: Hook) -> None:
         """钩中了：把对方拽到钩尖上，并把收线要走的折线准备好。"""
-        hook.target = victim.player
+        hook.target = victim
         # 钩住期间对方被**沉默**：钩中人是从咬住那一刻算起的，一直到松手为止
         # （中途有人没了就在 reel_hook 那条早退里解封）。和吸住那条沉默是同一个
         # 通用机制——封的是"开"这个动作，已经在生效的技能照常走完，冷却照常走
@@ -376,7 +656,7 @@ class Match:
 
     def reel_hook(self, owner: Ball, hook: Hook, dt: float) -> None:
         """收线：对方沿钩锁当初走过的那条路被原路拖回来，一路持续掉血。"""
-        victim = self.balls.get(hook.target)
+        victim = hook.target
         if victim is None or not victim.alive or not owner.alive:
             # 有人没了，钩锁随即作罢。走 finish_skill 收尾，好让冷却从这一刻开始
             owner.finish_skill()
@@ -388,7 +668,10 @@ class Match:
 
         before = Vector2(victim.position)
         hook.pulled = min(hook.total, hook.pulled + hook.pull_speed * dt)
-        victim.position = point_from_end(hook.path, hook.pulled)
+        # 钩尖跟着被拖的人一起往回走。**这一句是画绳子用的**：绳子按 pulled
+        # 截断画，钩尖不动的话看着就像钩子挂在原地、只有人被拽过来
+        hook.position = point_from_end(hook.path, hook.pulled)
+        victim.position = Vector2(hook.position)
 
         # 速度是推出来的，不是自己演的：位移由折线定，velocity 只是让调试箭头
         # 和伤害口径跟得上，不至于指着一个方向却往另一个方向飞
@@ -427,12 +710,10 @@ class Match:
 
     def pulled_pair(self) -> tuple[Ball, Ball] | None:
         """当前正被钩锁往回拖的那一对（渔夫, 敌人），没有则为 None。"""
-        for ball in self.balls.values():
+        for ball in self.combatants():
             hook = ball.hook
-            if hook is not None and hook.reeling:
-                victim = self.balls.get(hook.target)
-                if victim is not None:
-                    return ball, victim
+            if hook is not None and hook.reeling and hook.target is not None:
+                return ball, hook.target
         return None
 
     def _is_pulled_pair(self, first: Ball, second: Ball) -> bool:
@@ -440,10 +721,53 @@ class Match:
         return pair is not None and first in pair and second in pair
 
     def cast_ready_skills(self) -> None:
-        """技能自动释放：冷却一好就放，玩家不需要操作。吸住期间不释放。"""
-        for ball in self.balls.values():
+        """技能自动释放：冷却一好就放，玩家不需要操作。吸住期间不释放。
+
+        两栏都问：主球用玩家选的那个技能，召唤物用它自己带的（骑士的是
+        IdleSkill——那一栏的 ready 永远回 False，所以骑士一辈子不会被这里点到）。
+        遍历范围是全部单位，不是只挑主球：以后哪个召唤物配了真技能，这里不用改。
+        """
+        for ball in self.combatants():
             if ball.alive:
                 ball.activate_skill(self)
+
+    # ---------------- 召唤 ----------------
+    def summon_knights(self, owner: Ball, knight: Character, count: int,
+                       launch_speed: float) -> None:
+        """从 owner 身上朝四周均匀甩出 count 个骑士，之后就交给它们自己飞。
+
+        和 NightfallSkill 调 start_darkness 是同一个分工：技能管"召几个、多快"，
+        造球和摆位置留在 Match——造一颗球要走 Arena（出生点得躲开别人、得夹在
+        场内），球不知道战场在哪。
+
+        方向基准取**国王自己的朝向**（同 Ball.start_blade：写死一个起始角的话，
+        两边同时放技能会像同步的机械，跟着朝向走才一眼看得出这批骑士是从谁身上
+        出来的）。360° 均分，所以三个骑士正好是 120° 一个。
+
+        出生点摆在自己身外一圈（owner.radius + knight.radius）：摆在身子底下的话
+        三个骑士会和国王叠在一起，得靠后面几帧的碰撞分离慢慢挤开——那是"渗出来"
+        不是"甩出去"，而且分离那几帧里它们的位置是被人推着走的，初速度根本看不
+        出来。摆到刚好相切，第一帧起就是干净的三条直线。
+
+        贴墙放技能时有一个骑士会被摆到墙外，所以摆完立刻夹一次（clamp_inside）：
+        反正它这一帧还要走撞墙判定，夹回来就行。
+
+        召出来的骑士是 summoned=True 的球，进的是和两颗主球同一张 units 表——
+        它在场上就是一个普通的作战单位，只是不参与胜负、换位、重开那几件事
+        （见 mains）。
+        """
+        base = math.atan2(owner.heading.y, owner.heading.x)
+        for index in range(count):
+            angle = base + math.tau * index / count
+            direction = Vector2(math.cos(angle), math.sin(angle))
+            position = owner.position + direction * (owner.radius + knight.radius)
+            baby = Ball.spawn(owner.player, knight, position,
+                              direction * launch_speed, summoned=True)
+            self.arena.clamp_inside(baby.position, baby.radius)
+            # 和 Match._spawn 一样问一遍常驻被动。骑士现在两栏都是空的，所以这一步
+            # 什么都不做——留着是为了以后给骑士配了被动时不会悄悄漏掉
+            knight.attach_passives(baby, self)
+            self.units.append(baby)
 
     # ---------------- 范围光环 ----------------
     def apply_auras(self, dt: float) -> None:
@@ -451,13 +775,16 @@ class Match:
 
         判定用**圆心**是否落在圈内，和画出来的那个圈严格一致（不是"圆面相交"）。
         所以贴着圈边站还能吃到，圆心一出圈就立刻恢复——减速不残留。
+
+        **自己一边的不吸**（见 same_side）：圈的主人自己的骑士站在圈里也照样
+        吃满速度，不然国王召完骑士就得看着它们被自己的圈拖慢。
         """
-        for owner in self.balls.values():
+        for owner in self.combatants():
             aura = owner.aura
             if aura is None or not owner.alive:
                 continue
-            for target in self.balls.values():
-                if target is owner or not target.alive:
+            for target in self.combatants():
+                if self.same_side(owner, target) or not target.alive:
                     continue
                 offset = target.position - owner.position
                 if offset.length_squared() > aura.radius * aura.radius:
@@ -485,12 +812,12 @@ class Match:
         是同一路数字，因为性质一样：都是每帧结算的持续伤害，一帧飘一个数字
         会糊成一片。
         """
-        for owner in self.balls.values():
+        for owner in self.combatants():
             grid = owner.lasers
             if grid is None or not grid.beams or not owner.alive:
                 continue
-            for target in self.balls.values():
-                if target is owner or not target.alive:
+            for target in self.combatants():
+                if self.same_side(owner, target) or not target.alive:
                     continue
                 # 多根叠加：压在几条线上就是几倍的每秒伤害
                 rate = sum(
@@ -518,19 +845,19 @@ class Match:
 
         自己的刀不伤自己，和激光同理。
         """
-        for owner in self.balls.values():
+        for owner in self.combatants():
             blade = owner.blade
             if blade is None or not owner.alive:
                 continue
             blade.advance(dt)
-            for target in self.balls.values():
-                if target is owner or not target.alive:
+            for target in self.combatants():
+                if self.same_side(owner, target) or not target.alive:
                     continue
                 if not blade.hits(owner.position, target.position, target.radius):
                     continue
                 # 转过去的这一圈已经刮过它了——刀压在敌人身上是每帧都"挨着"的，
                 # 少了这一问，一秒就是 60 下
-                if not blade.consume(target.player):
+                if not blade.consume(target.uid):
                     continue
                 target.take_damage(blade.damage)
                 # "撞得多快"取**刀尖**速度，不是武士自己的：站着不动的武士照样
@@ -566,19 +893,19 @@ class Match:
 
         自己的锤子不砸自己，和刀同理。
         """
-        for owner in self.balls.values():
+        for owner in self.combatants():
             hammer = owner.hammer
             if hammer is None or not owner.alive:
                 continue
             hammer.advance(dt)
-            for target in self.balls.values():
-                if target is owner or not target.alive:
+            for target in self.combatants():
+                if self.same_side(owner, target) or not target.alive:
                     continue
                 if not hammer.hits(owner.position, target.position, target.radius):
                     continue
                 # 抡过去的这一圈已经砸过它了——锤头压在敌人身上是每帧都"挨着"的，
                 # 少了这一问，一秒就是 60 下
-                if not hammer.consume(target.player):
+                if not hammer.consume(target.uid):
                     continue
                 before = Vector2(target.effective_velocity)
                 launched, damage = hammer.impact(
@@ -638,7 +965,7 @@ class Match:
         self.effects.hits.jolt(SHAKE_EXTRA_SLASH)
 
         ball.blink = BlinkStrike(
-            target=target.player,
+            target=target,
             facing=facing,
             slash_remaining=slash_seconds,
             slash_total=slash_seconds,
@@ -660,7 +987,7 @@ class Match:
         掉血走 effects.drain_damage（红字、攒着报），和吸血同一路：都是每帧
         结算的持续伤害，一帧飘一个数字会糊成一片。
         """
-        for ball in self.balls.values():
+        for ball in self.combatants():
             strike = ball.blink
             if strike is None:
                 continue
@@ -669,7 +996,7 @@ class Match:
             if strike.flash_remaining > 0.0:
                 strike.flash_remaining = max(0.0, strike.flash_remaining - dt)
 
-            target = self.balls.get(strike.target)
+            target = strike.target
             if target is None or not target.alive or not ball.alive:
                 ball.finish_skill()
                 continue
@@ -712,7 +1039,7 @@ class Match:
         return ball.position.distance_to(target.position) > strike.break_distance
 
     # ---------------- 黑夜降临 ----------------
-    def start_darkness(self, total: float, caster: int,
+    def start_darkness(self, total: float, caster: Ball | None,
                        slow_factor: float = 1.0) -> None:
         """拉下一次黑夜，记下是谁放的。已经在黑着就不再拉——同时只有一场。
 
@@ -741,15 +1068,15 @@ class Match:
             darkness.swapped = True
             # 已经分出胜负就不再换位：对面可能已经死了，把 0 血换过来会连带
             # 把赢家也拖成 0，一场明明打赢了的对局变成平局。
-            # 不足两颗球也没什么可换的（技能是和选人绑的，正常走不到这儿）
-            if len(self.balls) >= 2 and all(
-                ball.alive for ball in self.balls.values()
-            ):
+            # 不足两颗主球也没什么可换的（技能是和选人绑的，正常走不到这儿）。
+            # 数的是主球：换位换的是"玩家本人那两颗"，骑士不参与
+            pairs = self.mains()
+            if len(pairs) >= 2 and all(ball.alive for ball in pairs):
                 self.nightfall_swap(darkness.caster)
         if darkness.finished:
             self.darkness = None
 
-    def nightfall_swap(self, caster: int) -> None:
+    def nightfall_swap(self, caster: Ball) -> None:
         """黑夜的正题：双方**互换位置与血量**，动量和其他一切都留在原地。
 
         但**换不换要看放技能的人落后没有**：放的人血量百分比不低于对手时，
@@ -771,8 +1098,8 @@ class Match:
         穿刺不在此列：它只是"这颗球自己沿着一个方向在走"，位置还是自己的，
         而且打没打中是每帧实时判距离的（见 check_thrust_hit），换完接着冲就是。
         """
-        first, second = (self.balls[player] for player in sorted(self.balls))
-        mine = self.balls[caster]
+        first, second = self.mains()
+        mine = caster
         theirs = second if mine is first else first
 
         # 放的人没落后就什么都不换：黑屏已经黑过了，但场面原样不动。
@@ -806,14 +1133,18 @@ class Match:
 
         所以别把它当成"夜降临专用"的判据：以后再有"推不动/挪不动"的场合，
         该问的还是这里，不是 ball.frozen（那个只认钩锁，漏掉被吸住的人）。
+
+        比对的是**球本身**而不是玩家序号。序号在这里会认错人：吸住和钩锁记的
+        都是序号，而骑士和它的国王共用一个序号——按序号比的话，国王被吸住时
+        他的骑士也会被算成霸体，锤子就砸不飞它们了。
         """
         if ball.frozen:
             return True
         latch = self.latch
-        if latch is not None and ball.player in (latch.grabber, latch.victim):
+        if latch is not None and ball in (latch.grabber, latch.victim):
             return True
         pair = self.pulled_pair()
-        return pair is not None and ball in pair
+        return pair is not None and any(ball is caught for caught in pair)
 
     # ---------------- 蛛丝 ----------------
     def apply_webs(self, dt: float) -> None:
@@ -833,11 +1164,11 @@ class Match:
         减速取**最狠的那一根**而不是逐根相乘：每根丝都按比例乘一遍的话，几根
         丝叠起来就是指数级地慢，两三下就贴死在原地了。伤害才是叠加的。
         """
-        for owner in self.balls.values():
+        for owner in self.combatants():
             if not owner.webs or not owner.alive:
                 continue
-            for target in self.balls.values():
-                if target is owner or not target.alive:
+            for target in self.combatants():
+                if self.same_side(owner, target) or not target.alive:
                     continue
                 touched = [
                     web for web in owner.webs
@@ -869,7 +1200,7 @@ class Match:
         "一根刺同时扎出两份伤害"。蓄力也一并开始，所以另一颗球接着碰也不会
         蹭到连着的第二下。
         """
-        for owner in self.balls.values():
+        for owner in self.combatants():
             if not owner.spikes or not owner.alive:
                 continue
             for spike in owner.spikes:
@@ -877,8 +1208,8 @@ class Match:
                 # 没长好的刺不判定——它挂在那儿只是个记号，等蓄满再算
                 if not spike.armed:
                     continue
-                for target in self.balls.values():
-                    if target is owner or not target.alive:
+                for target in self.combatants():
+                    if self.same_side(owner, target) or not target.alive:
                         continue
                     if not spike.touches(target.position, target.radius):
                         continue
@@ -905,7 +1236,7 @@ class Match:
         都是每帧结算的持续伤害，一帧飘一个数字会糊成一片。也**不震屏**——这个
         游戏里"震"的含义是"挨了一下"，中毒是"在掉血"（见 fx/impact.py）。
         """
-        for ball in self.balls.values():
+        for ball in self.combatants():
             if not ball.venom or not ball.alive:
                 continue
             kept = []
@@ -963,7 +1294,7 @@ class Match:
         战场没变它就一模一样，重铺没有意义。真正要清的只有那些子——它们的 owner
         是上一局的玩家序号，留着会变成没人认领的雷。
         """
-        if not any(ball.go_plan is not None for ball in self.balls.values()):
+        if not any(ball.go_plan is not None for ball in self.combatants()):
             self.go_board = None
             return
         if self.go_board is None:
@@ -982,6 +1313,10 @@ class Match:
         和光环、激光、蛛丝、毒刺同一批结算，都放在吸住/钩锁的提前返回之前——
         被吸住、被钩着拖着的人也照样会踩到子：子画在地上，跟谁在动没关系。
 
+        **一拍只落一颗子**（见 GoBoard.play）：钟到点了就落那一颗，是黑是白由
+        那一手排到哪儿了决定。所以这里看到的是"每 interval 秒场上多一颗"，
+        不是"每 interval 秒多一手棋"。
+
         **自己的子不炸自己**（同激光、蛛丝、毒刺），而且踩上去也**不消耗**它
         ——子只对对手有效，自己的球从上面走过去不会替对手把雷排掉。所以摘除
         排在所有权判定**后面**，顺序反过来就成了"自己走一趟替对手清场"。
@@ -996,21 +1331,22 @@ class Match:
         if board is None:
             return
 
-        for owner in self.balls.values():
+        for owner in self.combatants():
             plan = owner.go_plan
             if plan is None or not owner.alive:
                 continue
             if plan.tick(dt):
-                board.place(plan, owner.player)
+                board.play(plan, owner)
 
-        for ball in self.balls.values():
+        for ball in self.combatants():
             if not ball.alive:
                 continue
             cell = board.cell_of(ball.position)
             if cell is None:
                 continue
             stone = board.stone_at(cell)
-            if stone is None or stone.owner == ball.player:
+            # 按**边**比，不按球比：望自己召出来的东西踩上去也算自己一边
+            if stone is None or self.same_side(stone.owner, ball):
                 continue
             board.take(cell)
             ball.take_damage(stone.damage)
@@ -1035,7 +1371,7 @@ class Match:
         取 min 而不是乘：减速**不叠加**（用户定的），和蛛丝那几根同一个处理。
         真乘起来的话，连踩两颗就贴在地上了。
         """
-        for ball in self.balls.values():
+        for ball in self.combatants():
             slow = ball.slow
             if slow is None:
                 continue
@@ -1052,7 +1388,7 @@ class Match:
 
         冲的这几帧球不按自己的动量走，所以它和钩锁一样要在 Match 里单独推。
         """
-        for ball in self.balls.values():
+        for ball in self.combatants():
             thrust = ball.thrust
             if thrust is None:
                 continue
@@ -1091,8 +1427,8 @@ class Match:
         """
         if thrust.landed:
             return False
-        for target in self.balls.values():
-            if target is ball or not target.alive:
+        for target in self.combatants():
+            if self.same_side(ball, target) or not target.alive:
                 continue
             reach = ball.radius + target.radius
             offset = target.position - ball.position
@@ -1119,10 +1455,15 @@ class Match:
         ball.set_effective_velocity(thrust.direction * thrust.exit_speed)
 
     def direction_to_opponent(self, ball: Ball) -> Vector2:
-        """从这颗球指向对面那颗的单位向量。刚好重合时退回自己的朝向。"""
-        for other in self.balls.values():
-            if other is ball or not other.alive:
-                continue
+        """从这颗球指向对面那颗的单位向量。刚好重合时退回自己的朝向。
+
+        只认**对方本人那颗主球**，不看骑士。瞄准是"我要冲谁"这个层面的决定，
+        而骑士是挡在路上的东西、不是目标——对着骑士放穿刺或闪现没有意义。
+        技能一律冲着对方本人去，骑士要挡就靠自己的身板去挡（穿刺途中撞上骑士
+        照样捅得到，见 check_thrust_hit）。
+        """
+        other = self.opponent(ball)
+        if other is not None and other.alive:
             offset = other.position - ball.position
             if offset.length_squared() > 1e-12:
                 return offset.normalize()
@@ -1131,11 +1472,12 @@ class Match:
     # ---------------- 碰撞 ----------------
     def resolve_collision(self) -> None:
         """两球相撞。发生什么由角色主张，Match 只负责执行。"""
-        if len(self.balls) < 2:
+        pair = self.mains()
+        if len(pair) < 2:
             self.touching = False
             return
 
-        first, second = (self.balls[player] for player in sorted(self.balls))
+        first, second = pair
         offset = second.position - first.position
         minimum = first.radius + second.radius
 
@@ -1169,14 +1511,22 @@ class Match:
 
         # 撞击伤害只要撞上就结算。抓取只顶替"弹开"，不免除伤害——
         # 所以被抓住的一方在被抓住的那一瞬间仍然打得出这一下。
+        #
+        # 每一方身上落**两笔**：对方主张打过来的那一笔，和自己主张里"自损"的
+        # 那一笔（国王就是靠后者变成"撞上去是亏的"）。两笔都是各自算好的数，
+        # 这里只管往下砸
         second.take_damage(first_wants.damage_to_other)
+        first.take_damage(first_wants.damage_to_self)
         first.take_damage(second_wants.damage_to_other)
+        second.take_damage(second_wants.damage_to_self)
         # 撞得有多快取**相对速度**：两球各自多快不重要，合起来撞得狠不狠才重要，
-        # 所以迎面对冲能撞出最大那一下。这一下也是全场唯一会顿帧的命中
+        # 所以迎面对冲能撞出最大那一下。这一下也是全场唯一会顿帧的命中。
+        # 飘的数字是每一方这一撞总共掉了多少，两笔加在一起——不然国王那一边
+        # 只飘出"对方打来的 20"，血条却掉了 65
         self.effects.hits.strike(Hit.between(
             first, second,
-            first_takes=second_wants.damage_to_other,
-            second_takes=first_wants.damage_to_other,
+            first_takes=second_wants.damage_to_other + first_wants.damage_to_self,
+            second_takes=first_wants.damage_to_other + second_wants.damage_to_self,
             speed=(first.effective_velocity - second.effective_velocity).length(),
         ))
         self.judge()
@@ -1259,6 +1609,101 @@ class Match:
             first.position -= normal * push
             second.position += normal * push
 
+    # ---------------- 骑士的碰撞 ----------------
+    def resolve_summons_collisions(self) -> None:
+        """骑士参与的那些碰撞：骑士互撞、骑士撞球。
+
+        为什么不在 resolve_collision 里顺手办掉：那一趟从头到尾都在处理**两颗
+        主球**——它把两颗主球解包成 first/second、问钩锁有没有拽着这一对、问霸体、
+        要抓就把这一对绑起来。那套东西是照着"这一局只有这两颗"写的，多一颗球就
+        进不去。所以带召唤物的那些对单独一趟，两边各管各的，互不重叠（一对里只要
+        有召唤物就归这趟）。
+
+        三条规矩（用户定的一起对上）：
+
+        - **自己人只撞不伤**。国王和它的骑士、骑士和骑士，撞上照常弹开，但
+          on_collision 一概不问——不问就自然不会有伤害，也不会有抓取和沉默。
+        - **撞敌人照常主张**。骑士打人很疼、自己也掉一点（见 characters/knight.py），
+          国王打人很轻、自己掉很多（见 characters/king.py），两个方向都算。
+        - 抓取**不生效**：Latch 是"吸住一串连体位移"的机制，要的是一对稳定的两人组，
+          召唤物进来会把合体速度、霸体、黑夜换位那一整套搅乱。所以这里只取主张里
+          的伤害，grabs / silences 丢掉。
+
+        每帧只挑出"刚贴上"的那些对结算一次，剩下的只做分离——和 resolve_collision
+        里那个 touching 是同一件事。区别是这里要**一对一个标记**：主球只有两颗、
+        整场只可能有一对，所以那边一个 bool 就够；召唤物有好几颗，共用一个 bool
+        会让其中一对贴上时压制住其它所有对的结算（summon_contacts 就是那份名单，
+        存的是球的 uid）。
+        """
+        summon_uids = {unit.uid for unit in self.summons()}
+        if not summon_uids:
+            self.summon_contacts.clear()
+            return
+
+        units = self.combatants()
+        touching: set[tuple[int, int]] = set()
+        for index, first in enumerate(units):
+            for second in units[index + 1:]:
+                # 两颗主球之间那一下归 resolve_collision，这里只认带召唤物的对
+                if first.uid not in summon_uids and second.uid not in summon_uids:
+                    continue
+                if not (first.alive and second.alive):
+                    continue
+                offset = second.position - first.position
+                minimum = first.radius + second.radius
+                if offset.length_squared() >= minimum * minimum:
+                    continue
+
+                distance = offset.length()
+                # 正重合时法线无从谈起，随便挑一个方向把它们推开（同 resolve_collision）
+                normal = offset / distance if distance > 0 else Vector2(1.0, 0.0)
+                key = (min(first.uid, second.uid), max(first.uid, second.uid))
+                touching.add(key)
+                self.bump(first, second, normal, distance, minimum,
+                          fresh=key not in self.summon_contacts)
+
+        # 整份名单换掉而不是往里加：这一帧没挨着的对，下一帧再贴上要重新算"刚贴上"
+        self.summon_contacts = touching
+
+    def bump(self, first: Ball, second: Ball, normal: Vector2, distance: float,
+             minimum: float, fresh: bool) -> None:
+        """召唤物那一趟里的一对相撞。fresh 是"这一对是不是这一帧才贴上的"。
+
+        弹开走的是和主球一样的等质量弹性碰撞（沿法线的分量互换），没按半径算
+        质量——主球那边也是这么写的，两边保持一致比"更物理一点"重要。
+
+        霸体的一方不参与换速度（它的速度不由自己说了算，换了也白换），分离那
+        一步由 separate 处理——它认 frozen，会把该走的位移全给另一边。
+        """
+        if fresh and not self.same_side(first, second):
+            first_wants = first.character.on_collision(first, second)
+            second_wants = second.character.on_collision(second, first)
+            second.take_damage(first_wants.damage_to_other)
+            first.take_damage(first_wants.damage_to_self)
+            first.take_damage(second_wants.damage_to_other)
+            second.take_damage(second_wants.damage_to_self)
+            self.effects.hits.strike(Hit.between(
+                first, second,
+                first_takes=second_wants.damage_to_other + first_wants.damage_to_self,
+                second_takes=first_wants.damage_to_other + second_wants.damage_to_self,
+                speed=(first.effective_velocity - second.effective_velocity).length(),
+            ))
+            self.judge()
+
+        # 自己人相撞**什么都不报**：不飘字、不炸圈、不顿帧。这个游戏里"震"的
+        # 含义是"挨了一下"（见 fx/impact.py），而这一下谁都没挨着。国王冲进自己
+        # 那群骑士里的时候，每蹭一下都顿一帧会难看得没法玩
+        if not (self.has_super_armor(first) or self.has_super_armor(second)):
+            first_velocity = first.effective_velocity
+            second_velocity = second.effective_velocity
+            first.set_effective_velocity(
+                first_velocity - (first_velocity - second_velocity).dot(normal) * normal
+            )
+            second.set_effective_velocity(
+                second_velocity - (second_velocity - first_velocity).dot(normal) * normal
+            )
+        self.separate(first, second, normal, distance, minimum)
+
     # ---------------- 吸住 ----------------
     def start_latch(self, grabber: Ball, victim: Ball, seconds: float,
                     drain_per_second: float, silences: bool = False) -> None:
@@ -1273,8 +1718,8 @@ class Match:
         以后一个"钩锁"技能（把对手拖过来绑住）就是这个签名。
         """
         self.latch = Latch(
-            grabber=grabber.player,
-            victim=victim.player,
+            grabber=grabber,
+            victim=victim,
             velocity=self.combined_velocity(grabber, victim),
             remaining=seconds,
             drain_per_second=drain_per_second,
@@ -1321,8 +1766,8 @@ class Match:
         这一对就会带着"嵌在墙里"的姿势飞完整整一帧。
         """
         latch = self.latch
-        grabber = self.balls[latch.grabber]
-        victim = self.balls[latch.victim]
+        grabber = latch.grabber
+        victim = latch.victim
         latch.velocity, impact = self.arena.bounce_rigid_pair(
             grabber, victim, latch.velocity
         )
@@ -1332,8 +1777,8 @@ class Match:
     def update_latch(self, dt: float) -> None:
         """吸住期间的每一帧：整体飞、持续吸取、到点松口。"""
         latch = self.latch
-        grabber = self.balls[latch.grabber]
-        victim = self.balls[latch.victim]
+        grabber = latch.grabber
+        victim = latch.victim
 
         # 只走计时器。吸住期间两球不再按各自动量位移，速度那两份暂时是失效的
         grabber.tick(dt)
@@ -1365,8 +1810,8 @@ class Match:
         得先按各自的加成分量减回去，否则加速会被算两遍（松口瞬间球会窜快一截）。
         """
         latch = self.latch
-        grabber = self.balls[latch.grabber]
-        victim = self.balls[latch.victim]
+        grabber = latch.grabber
+        victim = latch.victim
 
         offset = victim.position - grabber.position
         length = offset.length()
@@ -1388,13 +1833,46 @@ class Match:
         """当前粘在一起的两球（没吸住则为 None），供调试视图画连线用。"""
         if self.latch is None:
             return None
-        return self.balls[self.latch.grabber], self.balls[self.latch.victim]
+        return self.latch.grabber, self.latch.victim
+
+    def retire_summons(self) -> None:
+        """把被打死的召唤物从场上摘走。
+
+        骑士**只有被打死才消失**（用户定的）：没有存活时长、不会自己走，所以
+        除了这里没有第二条退场的路。
+
+        挂在 judge 上，是因为 judge 是"任何一处伤害结算完之后"的必经之路——
+        每一次扣血（光环、激光、刀、锤、蛛丝、毒刺、中毒、棋子、穿刺、碰撞、
+        吸住）后面都跟着一句 judge。放在这里就等于"谁死了谁下台"，不用在十几个
+        扣血点各写一遍，也不会漏掉哪个新加的伤害源。
+
+        摘的时候顺带清掉沾着它的接触标记：uid 永不复用，留着也认不错人，但那份
+        名单会随着对局一直长下去。
+        """
+        live = self.summons()
+        if len(live) == len(self.units) - len(self.mains()):
+            # 数量和场上对得上，说明没有召唤物刚死，整趟都不用跑
+            if not any(not unit.alive for unit in live):
+                return
+        gone = {unit.uid for unit in self.units if unit.summoned and not unit.alive}
+        if not gone:
+            return
+        self.units = [unit for unit in self.units if unit.uid not in gone]
+        self.summon_contacts = {
+            pair for pair in self.summon_contacts
+            if pair[0] not in gone and pair[1] not in gone
+        }
 
     # ---------------- 胜负 ----------------
     def judge(self) -> None:
-        survivors = [player for player, ball in self.balls.items() if ball.alive]
-        if len(survivors) == len(self.balls):
+        # 先收尸再判胜负：骑士死光不等于谁输了，这一句和下面的 survivors 没有
+        # 关系（survivors 数的是主球）。放在这里只是因为它是"伤害结算完"的
+        # 必经之路，见 retire_summons
+        self.retire_summons()
+        standing = [ball for ball in self.mains() if ball.alive]
+        if len(standing) == len(self.mains()):
             return
         self.finished = True
-        # 同时归零则平局
-        self.winner = survivors[0] if len(survivors) == 1 else None
+        # 同时归零则平局。赢家报的是**玩家序号**——胜负是玩家之间的事，
+        # 界面等着这个数去点亮哪一边
+        self.winner = standing[0].player if len(standing) == 1 else None

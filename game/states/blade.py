@@ -36,7 +36,7 @@ class Blade:
     outer_radius: float = 0.0     # 刀刃外端
     damage: float = 0.0           # 蹭一下扣多少血
     swept: float = 0.0            # 这一圈已经转过的弧度
-    struck: set[int] = field(default_factory=set)   # 这一圈已经蹭过谁
+    struck: set[int] = field(default_factory=set)   # 这一圈已经蹭过的球（存 Ball.uid）
 
     @property
     def direction(self) -> Vector2:
@@ -79,13 +79,16 @@ class Blade:
         start, end = self.reach(center)
         return distance_to_segment(point, start, end) <= radius
 
-    def consume(self, player: int) -> bool:
-        """这一圈还没蹭过这个玩家就记上一笔。返回**该不该结算伤害**。
+    def consume(self, uid: int) -> bool:
+        """这一圈还没蹭过这颗球就记上一笔。返回**该不该结算伤害**。
 
-        这就是"每圈一次"的全部实现：蹭到了先问一句，问过的人不加第二次，
+        这就是"每圈一次"的全部实现：蹭到了先问一句，问过的不加第二次，
         等 Blade.advance 转满一圈把名单清空，才能再蹭。
+
+        记的是球的 uid 而不是玩家序号：序号说的是"站哪一边"，国王和它的骑士
+        共用一个序号，一刀砍在两边身上会被当成同一个打过两遍（见 Ball.uid）。
         """
-        if player in self.struck:
+        if uid in self.struck:
             return False
-        self.struck.add(player)
+        self.struck.add(uid)
         return True

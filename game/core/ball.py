@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 import random
 from dataclasses import dataclass, field
@@ -16,9 +17,10 @@ from pygame.math import Vector2
 from ..states.blade import Blade
 from ..characters import Character
 from ..states.blink import BlinkStrike
+from ..states.fish import Fish
 from ..states.go_board import GoPlan
 from ..states.hammer import Hammer
-from ..states.hook import Hook
+from ..states.hook import FishSpec, Hook
 from ..states.laser import Beam, LaserField
 from ..states.thrust import Thrust
 from ..states.venom import PoisonStack, Spike
@@ -38,6 +40,10 @@ from ..config.settings import (
     VENOM_STACK_RING_MAX,
     VENOM_STACK_RING_PADDING,
 )
+
+
+# 球的唯一编号发到几号了。**只增不减、永不复用**——见 Ball.uid
+_UID = itertools.count(1)
 
 
 def random_velocity() -> Vector2:
@@ -82,9 +88,16 @@ class TimedSlow:
     ratio: float
 
 
-@dataclass
+@dataclass(eq=False)
 class Ball:
     """一个作战单位。
+
+    `eq=False`：球是**实体**，不是值——两颗骑士长得再像也是两颗骑士。
+    默认那个按字段逐项比较的 `==` 会在这里闯祸：场上指向某颗球的地方（钩锁的
+    目标、吸住的双方、刺客砍的人、"这一对里有没有它"）全都在拿它们对身份，
+    逐项比较下两颗刚出生、位置速度血量都一样的骑士会当场被判成同一颗。
+    关掉之后 `==` 退回默认的"是不是同一个对象"，球也重新变得可哈希（可以塞进
+    集合、当字典的键）。
 
     尺寸来自角色（character.radius），颜色来自玩家队色（PLAYER_COLORS[player]），
     所以两位玩家选同一个角色也能分清。
@@ -111,6 +124,28 @@ class Ball:
     position: Vector2
     velocity: Vector2             # 基础速度（不含任何加成）
     hp: float
+    # 这颗球的**唯一编号**，出生时自动领一个。和 player 是两码事：player 说的是
+    # "站哪一边"（国王和它的骑士是同一个 player），uid 说的是"是不是同一颗球"。
+    #
+    # 要它是因为刀和锤子那张"这一圈已经打过谁"的名单：那张名单原来是按 player
+    # 记的，两颗主球的 player 一定不同，所以一直没出过问题。多了骑士就不行了
+    # ——国王和他的骑士共用一个 player，一刀砍在国王身上再砍在骑士身上会被
+    # 当成"同一个打过两遍"，第二下白挨。
+    #
+    # 全局递增、永不复用：复用了的话，上一颗球留在名单里的编号会扣到新球头上，
+    # 新球一出生就自带"这圈已经打过你"的免死金牌
+    uid: int = field(default_factory=lambda: next(_UID))
+    # 这颗球是**被召唤出来的**还是"玩家本人那颗"。
+    #
+    # 和 player、uid 是三件事：player 说"站哪一边"（国王和它的骑士一样），
+    # uid 说"是不是同一颗球"，这一项说"它在场上的身份"——主球是玩家选的
+    # 那个角色本人，召唤物是它放出来的兵（骑士）。
+    #
+    # 要它是因为有几件事**只对主球成立**：胜负判定数的是主球（骑士死光不算输）、
+    # 黑夜换位换的是主球（跟一颗骑士换位毫无意义）、选人重开重建的也是主球。
+    # 早先这些地方靠"球住在哪个列表里"来区分（balls / knights 两列），现在
+    # 场上只有一张 units 表，这个区分就落到球自己身上
+    summoned: bool = False
     spawn_speed: float = 0.0      # 出生速度的大小。加速每档加它的固定比例，是"标尺"
     boost_stacks: int = 0         # 永久加速攒了几档
     boost_bonus: float = 0.0      # 加速累计加出来的绝对速度（像素/秒）
@@ -121,6 +156,13 @@ class Ball:
     speed_scale: float = 1.0      # 被减速的折扣，每帧由 Match 重置
     aura: Aura | None = None      # 自己身上挂着的范围光环
     hook: Hook | None = None      # 自己甩出去的钩锁（在飞 or 正在往回拖人）
+    # 钩空之后从钩子那儿放出来的那些鱼。和 lasers / webs / spikes 同类，是
+    # **"我留下了什么"的账本，不是技能生效中的标记**（用户定的）：鱼一放出来
+    # 技能就收招进冷却了，鱼只是还在水里游着，跟渔夫那条技能没有关系。
+    #
+    # 所以它得是**一列**而不是一条：技能一旦不再被鱼占着，冷却走完就能再甩
+    # 第二钩，那时候水里那条可能还没咬完。单槽的话第二次放鱼会把它悄悄顶掉
+    fishes: list[Fish] | None = None
     # 自己画在墙上的激光。和 hook 不同，它**不是技能生效的标记**——激光是
     # 被动的，线画出来之后技能早就"结束"了（压根没有冷却这回事），这个字段
     # 只是"我留下了什么"的账本。没撞过墙就是 None
@@ -170,14 +212,19 @@ class Ball:
 
     @classmethod
     def spawn(cls, player: int, character: Character, position: Vector2,
-              velocity: Vector2 | None = None) -> "Ball":
-        """满血、无冷却地生成一个球。"""
+              velocity: Vector2 | None = None,
+              summoned: bool = False) -> "Ball":
+        """满血、无冷却地生成一个球。
+
+        summoned 只有召唤物（骑士）才填 True，见 Ball.summoned。
+        """
         return cls(
             player=player,
             character=character,
             position=position,
             velocity=random_velocity() if velocity is None else velocity,
             hp=character.max_hp,
+            summoned=summoned,
         )
 
     # ---------------- 只读属性 ----------------
@@ -370,6 +417,8 @@ class Ball:
         self.aura = None
         self.hook = None
         self.blink = None
+        # **fishes 不在这里清**：鱼是"放出去就不管了"的东西，技能收招之后
+        # 它还要接着游（用户定的：召出鱼技能就进冷却）。清了就等于当场把它抹掉
         self.cooldown_timer = self.character.skill.cooldown
 
     # ---------------- 技能留在自己身上的状态 ----------------
@@ -395,21 +444,35 @@ class Ball:
         )
 
     def cast_hook(self, hook_speed: float, pull_speed: float,
-                  drain_per_second: float, reel_gap: float) -> None:
+                  drain_per_second: float, reel_gap: float,
+                  line_length: float, fish_spec: FishSpec | None = None) -> None:
         """朝当前朝向甩出一条钩锁，出膛点在自己身前一个半径处。
 
         往后的推进（飞、弹墙、钩中、收线）全在 Match 里，这里只负责把这一发
         顺着朝向丢出去。朝向沿用 heading——"向原方向释放"，
         哪怕速度已经被撞成 0（只剩加速那一截）也照样有方向。
+
+        line_length 是**鱼线总长**：钩锁只能飞这么远，到头还没钩到人就收场
+        （见 Match.fly_hook / hook_missed）。数值在放出这一发的这一刻就抄在
+        Hook 上，之后调角色参数不影响天上那条。
+
+        折线开出去就是**两个点**（出膛点、出膛点），不是先摆一个：折线的约定
+        是"path[-1] 永远是钩尖、前面那些点是钉死的拐角"，而弹墙那一步是
+        **把 path[-1] 改写成拐角再 append 一个新点**。只有出膛点一个的时候，
+        path[-1] 同时也是 path[0]，那一改就把出膛点本身抹掉了——第一段（出膛
+        到第一面墙）凭空消失，量出来的鱼线短了整整一截，收线也会从墙角起步
+        而不是从渔夫身前起步。多摆一个重复点，两个身份就分开了。
         """
         muzzle = self.position + self.heading * self.radius
         self.hook = Hook(
             position=Vector2(muzzle),
             velocity=self.heading * hook_speed,
-            path=[Vector2(muzzle)],
+            path=[Vector2(muzzle), Vector2(muzzle)],
             pull_speed=pull_speed,
             drain_per_second=drain_per_second,
             reel_gap=reel_gap,
+            max_length=line_length,
+            fish_spec=fish_spec if fish_spec is not None else FishSpec(),
         )
 
     def start_blade(self, angular_speed: float, inner_radius: float,
@@ -445,7 +508,8 @@ class Ball:
             damage_per_speed_sq=damage_per_speed_sq,
         )
 
-    def start_go(self, interval: float, black_damage: float, white_damage: float,
+    def start_go(self, interval: float, white_interval: float,
+                 black_damage: float, white_damage: float,
                  slow_seconds: float, slow_ratio: float) -> None:
         """挂上落子的节奏（望的常驻被动）。
 
@@ -454,16 +518,18 @@ class Ball:
         什么样"，球不知道战场在哪。这里挂的只是"多久落一手、落出来是什么成色"。
 
         第一手的钟拧满（从 interval 开始倒数，而不是 0）：开局两颗球是随机撒在
-        场上的，子也是随机落的，开局那一下两边撞上纯属白送。
+        场上的子也是随机落的，开局那一下两边撞上纯属白送。拧钟交给 GoPlan.arm
+        一个人做——它要看的条件（队列里排没排着白子）在这里正好是"空的"。
         """
         self.go_plan = GoPlan(
             interval=interval,
+            white_interval=white_interval,
             black_damage=black_damage,
             white_damage=white_damage,
             slow_seconds=slow_seconds,
             slow_ratio=slow_ratio,
-            timer=interval,
         )
+        self.go_plan.arm()
 
     def start_thrust(self, match, speed: float, distance: float,
                      damage: float) -> None:

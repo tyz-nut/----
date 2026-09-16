@@ -11,16 +11,20 @@ config/roster.py，行为写在这里。加技能 = 在本文件加一个类，
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from pygame.math import Vector2
 
 from ..core.predict import will_be_hit
+from ..states.hook import FishSpec
 
 if TYPE_CHECKING:
     from ..core.ball import Ball
     from ..core.match import Match
+    # 只在类型检查时 import：base 在运行时是 import 这个模块的（它要用 Skill），
+    # 真 import 进来就绕成一个圈了
+    from .base import Character
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,28 @@ class Skill:
 
 
 @dataclass(frozen=True)
+class IdleSkill(Skill):
+    """没有技能。
+
+    给骑士这种**纯召唤物**用的：Character 要求 skill 那一栏一定有东西，而骑士
+    的本事全在碰撞里（见 characters/knight.py），它不冷却、不触发、也没有技能条。
+    填一个空的 Skill 进去会留下一个 activate 抛 NotImplementedError 的坑——哪天
+    有人把骑士也算进 cast_ready_skills，那一帧就会当场炸。所以这里明确地把
+    ready 钉死成 False，activate 写成什么都不做：不是"忘了写"，是"本来就没有"。
+
+    顺带一提，骑士确实走不到 cast_ready_skills：那一趟遍历的是场上**全部**
+    单位，骑士也在里面，拦住它的正是这里这个 ready——所以这一栏钉死成 False
+    不是保险，是那趟循环唯一的闸门。
+    """
+
+    def ready(self, ball: Ball, match: Match) -> bool:
+        return False
+
+    def activate(self, ball: Ball, match: Match) -> None:
+        return
+
+
+@dataclass(frozen=True)
 class BoostSkill(Skill):
     """加速：每释放一次就永久涨一档，冷却好了再放就再涨一档。
 
@@ -137,29 +163,52 @@ class HookSkill(Skill):
     - 渔夫不动，而且获得**霸体**——别人撞上来会被原路弹回，推不动他。
       霸体只顶替"被推动"这件事，撞击伤害照常结算（所以高速撞上来的小球
       会把自己撞伤在渔夫身上，而渔夫自己造成 0 伤害）。
-    - 钩锁一路弹墙，直到钩中人为止（**没有超时**，见 ready 的说明）。
+    - 钩锁一路弹墙，但**鱼线是有限长的**：折线总长走到 line_length 还没钩到人
+      就收场（见 Match.fly_hook / hook_missed）。所以它不再能站在角落里无限抛。
     - 钩中之后，对方沿钩锁走过的那条路被原路拖回来，路上持续掉血；
       拖的过程中两人不算碰撞。
     - 拖到身前，两人相互推开，技能结束、开始进冷却。
 
+    **钩空不是白甩**（用户定的）：线放完还没咬到人，就在钩子落点那儿放一条鱼
+    出去追人，体型随机、咬多重活多久都跟着体型走。不过**有一定概率连鱼都放不
+    出来**（见 FishSpec.fail_chance）——那一档才是真的白甩一次。
+
     这类技能没有 duration：它要飞多久完全看什么时候钩到人，预先写不出来。
     所以覆盖 active()，靠 ball.hook 回答"还在生效吗"，结束时由 Match 收尾。
+
+    **鱼放出来技能就收招了**（用户定的）：冷却从放鱼那一刻开始走，鱼之后在
+    水里游多久、咬不咬得到，都跟这条技能没关系了——它是"放出去就不管了"的
+    东西，和激光画在墙上的线、蛛丝、毒刺同一类（见 Ball.fishes）。
     """
 
     hook_speed: float = 900.0        # 钩锁飞出去的速度（像素/秒）
     pull_speed: float = 800.0        # 收线速度（像素/秒）
     drain_per_second: float = 30.0   # 收线期间每秒从敌人身上吸走多少血
     reel_gap: float = 8.0            # 拉到身前时两球之间留的空隙（像素）
+    line_length: float = 900.0       # 鱼线总长（像素）。走到头还没钩到人就收场
+
+    # 钩空之后那条鱼的全部参数（体型范围、每像素多少伤害、游速、召唤失败率）。
+    # 打包成一整份而不是摊成七个字段：这一组数在放钩的那一刻是**整份**抄走的，
+    # 摊开写的话每加一个数就要在这里、cast_hook 的签名、Match 的调用点各改一处
+    fish: FishSpec = field(default_factory=lambda: FishSpec())
 
     def ready(self, ball: Ball, match: Match) -> bool:
         """钩锁只有一条：手上还挂着一条就不能再甩。
 
-        冷却时间其实管不住这件事——钩锁可能飞得比冷却还久，光靠冷却的话
-        冷却一走完他就会甩出第二条，而第一条还在天上。
+        冷却时间管不住这件事——钩锁可能飞得比冷却还久，光靠冷却的话冷却一走完
+        他就会甩出第二条，而第一条还在天上。
+
+        **鱼不在这个条件里**（用户定的）：鱼一放出来技能就收招了，冷却从那一刻
+        开始走，所以技能这边不欠它什么。水里同时游着几条鱼是允许的。
         """
         return ball.hook is None
 
     def active(self, ball: Ball) -> bool:
+        """生效中 = 手上还挂着钩锁。**鱼不算**（用户定的：召出鱼技能就进冷却）。
+
+        这一条决定了技能条上画什么：不算鱼，钩空之后条上才会如实变成蓝色的
+        "冷却 N 秒"，而不是继续黄着报那条鱼的剩余寿命。
+        """
         return ball.hook is not None
 
     def activate(self, ball: Ball, match: Match) -> None:
@@ -168,6 +217,8 @@ class HookSkill(Skill):
             pull_speed=self.pull_speed,
             drain_per_second=self.drain_per_second,
             reel_gap=self.reel_gap,
+            line_length=self.line_length,
+            fish_spec=self.fish,
         )
 
 
@@ -341,7 +392,7 @@ class NightfallSkill(Skill):
     slow_factor: float = 0.35   # 黑屏期间游戏速度压到几倍（1 = 不压）
 
     def activate(self, ball: Ball, match: Match) -> None:
-        match.start_darkness(self.duration, ball.player, self.slow_factor)
+        match.start_darkness(self.duration, ball, self.slow_factor)
 
 
 @dataclass(frozen=True)
@@ -493,19 +544,21 @@ class BladeSkill(Skill):
 
 @dataclass(frozen=True)
 class GoSkill(Skill):
-    """棋盘：把战场划成方格，每隔一段时间在空格里落一手棋——先黑后白。
+    """棋盘：把战场划成方格，每隔一段时间在空格里落一颗子——先黑后白。
 
     和刀、锤子同属**常驻被动**（ready 钉死成 False，起点是 on_spawn，不占技能
     条），但它是这几样里唯一**自己按时间动**的：刀和锤子只在自己被推进的时候
     转，撞不撞得上是对方的事；而这一样不需要任何触发，钟一到就落子。所以它是
     全场唯一一个"不看场上发生了什么、只因为时间到了就改变场地"的东西。
 
-    落一手的规则（用户定的）：
+    落子的规则（用户定的）：
 
-    - 黑子随机落在**任意一个空格**上。
-    - 白子落在**刚落的这颗黑子**上下左右四格之一。
-    - 四邻都占着、或者黑子落在边角上没那么多邻格时，**这一轮就不下白子**——
-      所以棋盘越满，白子越少、黑子（伤害高的那种）占比越高。
+    - 黑子随机落在任意一个空格上，随后**四颗白子一颗接一颗地跟上**，落在它的
+      上下左右四格上。
+    - 两份间隔：白子之间隔 white_interval（很短，看着就是唰唰唰唰铺开的一圈），
+      四颗落完之后才隔 interval 这个冷却起下一手。
+    - 四邻里已经有子的那几格不进队列，白子就相应地少几颗，一颗都排不上就是
+      "这一手不下白子"——所以棋盘越满，白子越少，黑子（伤害高的那种）占比越高。
     - 黑白都炸：踩上去掉血 **+ 减速**，减速不叠加。**黑子掉血更多。**
 
     踩上去的子**就没了**（用户定的"踩过就消失"）。所以棋子是地雷不是墙，棋盘
@@ -521,8 +574,11 @@ class GoSkill(Skill):
     时共用一块棋盘、各走各的钟。
     """
 
-    interval: float = 4.0           # 每隔几秒落一手。**这个数决定对手的压力**：
-                                    # 越短，棋盘上同时存在的子越多
+    interval: float = 4.0           # 一手落完之后隔几秒起下一手（冷却）。
+                                    # **这个数决定对手的压力**：越短，棋盘上同时
+                                    # 存在的子越多
+    white_interval: float = 0.2     # 同一手里白子之间隔几秒。就是"唰唰唰唰"那四下
+                                    # 有多快，改它只改白子铺开的手感，不改节奏
     black_damage: float = 60.0      # 踩到黑子掉多少血
     white_damage: float = 25.0      # 踩到白子掉多少血。比黑子轻——白子是配菜，
                                     # 它的作用是把黑子周围那片格子也变成雷区
@@ -546,6 +602,7 @@ class GoSkill(Skill):
         """
         ball.start_go(
             interval=self.interval,
+            white_interval=self.white_interval,
             black_damage=self.black_damage,
             white_damage=self.white_damage,
             slow_seconds=self.slow_seconds,
@@ -581,4 +638,44 @@ class ThrustSkill(Skill):
             speed=self.thrust_speed,
             distance=self.thrust_distance,
             damage=self.damage,
+        )
+
+
+@dataclass(frozen=True)
+class KingSkill(Skill):
+    """召唤骑士：从自己身上朝几个方向甩出一批骑士，之后就交给它们自己飞。
+
+    这是一次性技能（duration = 0）：放出来这一瞬间骑士就已经在路上了，之后
+    技能本身什么都不管——骑士不是"技能的效果"，是一颗**独立的球**，有自己的
+    血量、自己的动量，活得比这一下长得多，也**不会因为冷却好了就消失**。
+    所以这个技能真正调的是"多久能再造一批"，不是"骑士能撑多久"。
+
+    **骑士只有被打死才消失**（用户定的），没有存活时长。也就是说场上骑士的
+    数量 = 召唤批数 × count − 被打死的那些，活得越久堆得越多。所以 cooldown
+    是这个角色唯一能调的**数量**旋钮：把它调短，骑士会一直累加。
+
+    方向基准取国王自己的朝向（见 Match.summon_knights），不写死角度。
+    """
+
+    # 召出来的是什么。数值（血量、半径、撞人伤害）全在它身上，不在这里——
+    # 骑士是一个完整的角色，不该被拆成散装参数塞进技能里。
+    # 类型上允许 None 只是为了让 dataclass 的字段顺序成立（基类的 name/cooldown
+    # 是必填的），真正的必填由 __post_init__ 兜底：漏配了在**开局读 roster 的时候**
+    # 就当场报出来，不会拖到对局打了一半才发现
+    knight: Character | None = None
+    count: int = 3              # 一次召几个。均匀撒开，360°/count 一个方向
+    launch_speed: float = 320.0  # 甩出去的初速度（像素/秒）。压在出生速度那一档里
+                                 # （220~380），**不比出生速度快多少**——三个骑士一起
+                                 # 冲脸太像一发爆发，慢一点才是"围上来"
+
+    def __post_init__(self) -> None:
+        if self.knight is None:
+            raise ValueError("KingSkill 必须带上要召唤的骑士（见 config/roster.py）")
+
+    def activate(self, ball: Ball, match: Match) -> None:
+        match.summon_knights(
+            owner=ball,
+            knight=self.knight,
+            count=self.count,
+            launch_speed=self.launch_speed,
         )

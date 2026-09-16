@@ -19,6 +19,12 @@ duration。这里只负责按那两个数把 alpha 算出来。
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # 只在类型检查时 import：ball.py 在运行时走的是"球身上挂状态"这条路，
+    # 真 import 进来就绕成一个圈了
+    from ..core.ball import Ball
 
 
 @dataclass
@@ -28,13 +34,13 @@ class Darkness:
     rise: float          # 渐暗用几秒
     hold: float          # 全黑停几秒
     fall: float          # 渐亮用几秒
-    caster: int = 0      # 谁放的这一场。换位要不要发生是"从放的人的角度"看的
+    caster: Ball | None = None   # 谁放的这一场。换位要不要发生是"从放的人的角度"看的
     slow_factor: float = 1.0   # 黑屏期间把游戏速度压到几倍（1 = 不压）
     elapsed: float = 0.0
     swapped: bool = False   # 这一下换过位没有（换位只在黑到底的那一刻做一次）
 
     @classmethod
-    def for_duration(cls, total: float, caster: int,
+    def for_duration(cls, total: float, caster: "Ball | None",
                      slow_factor: float = 1.0) -> "Darkness":
         """按整段时长切出三段。
 

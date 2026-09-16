@@ -24,15 +24,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from pygame.math import Vector2
+
+if TYPE_CHECKING:
+    # 只在类型检查时 import：ball.py 在运行时是 import 这个模块的（Ball 上挂着
+    # blink 这一栏），真 import 进来就绕成一个圈了
+    from ..core.ball import Ball
 
 
 @dataclass
 class BlinkStrike:
     """一次进行中的闪现突袭。"""
 
-    target: int              # 砍的是谁（玩家序号）
+    target: Ball | None      # 砍的是哪一颗球。球是实体，直接存它本身（见 Ball 的 eq=False）
     facing: Vector2          # 挥砍朝向。**在闪现那一刻定死**，之后不跟着目标转
     slash_remaining: float   # 挥砍还剩几秒
     slash_total: float       # 这次挥砍一共几秒（画进度条用）

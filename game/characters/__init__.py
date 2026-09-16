@@ -10,6 +10,8 @@ from .assassin import PhantomAssassin
 from .base import Character, CollisionOutcome
 from .fisher import Fisher
 from .hammer import Hammer
+from .king import King
+from .knight import Knight
 from .laser import Laser
 from .lookout import Lookout
 from .necromancer import Necromancer
@@ -23,6 +25,8 @@ from .skills import (
     GoSkill,
     HammerSkill,
     HookSkill,
+    IdleSkill,
+    KingSkill,
     LaserSkill,
     NightfallSkill,
     Skill,
@@ -52,6 +56,8 @@ __all__ = [
     "VenomSpikeSkill",
     "VirulenceSkill",
     "GoSkill",
+    "IdleSkill",
+    "KingSkill",
     "NormalBall",
     "Vampire",
     "Fisher",
@@ -63,4 +69,6 @@ __all__ = [
     "PhantomAssassin",
     "VenomSting",
     "Lookout",
+    "King",
+    "Knight",
 ]

@@ -19,7 +19,8 @@ react_seconds 别填太大，填大了会开始频繁误报。
 ## 什么算"会撞上"
 
 对方的球，以及对方留在场上的东西：绕身刀、巨锤、激光、蛛丝、飞在半路的
-钩锁。这正是"敌人的攻击手段"的全集——每一个都会让刺客掉血或被抓。
+钩锁、水里游着的鱼。这正是"敌人的攻击手段"的全集——每一个都会让刺客掉血
+或被抓。
 
 不包括蝙蝠圈那种**范围场**：它是"站在里面就慢慢掉血"，不是"撞上"。刺客
 躲的是撞击，不是消耗。
@@ -56,7 +57,7 @@ def will_be_hit(match: Match, ball: Ball, horizon: float,
     # 只问"对方"：自己的刀和锤不会砸到自己，自己的钩锁也不钩自己
     others = [
         (other, other.effective_velocity)
-        for other in match.balls.values()
+        for other in match.combatants()
         if other is not ball and other.alive
     ]
     if not others:
@@ -74,6 +75,8 @@ def will_be_hit(match: Match, ball: Ball, horizon: float,
             if _web_hits(ball, mine, other, center):
                 return True
             if _hook_hits(ball, mine, other, t):
+                return True
+            if _fish_hits(match, ball, mine, other, t):
                 return True
             if _laser_hits(ball, mine, other):
                 return True
@@ -130,14 +133,50 @@ def _hook_hits(ball: Ball, mine: Vector2, other: Ball, t: float) -> bool:
     收线中的不算：那时候钩已经咬住人了，钩尖贴着被钩的那位，不再是一个会
     "扫过来"的东西。
 
-    钩锁是**会弹墙**的（而且没有超时，能飞很久），外推的直线迟早会偏离它真实
-    的折线路径。所以这条只在很短的 horizon 里可信，也正是这个技能需要的量级。
+    钩锁是**会弹墙**的（而且鱼线有 900 像素那么长，能飞两秒多），外推的直线
+    迟早会偏离它真实的折线路径。所以这条只在很短的 horizon 里可信，也正是这个
+    技能需要的量级。
     """
     hook = other.hook
     if hook is None or hook.reeling:
         return False
     tip = hook.position + hook.velocity * t
     return mine.distance_to(tip) <= ball.radius
+
+
+def _fish_hits(match: Match, ball: Ball, mine: Vector2, other: Ball,
+               t: float) -> bool:
+    """对方放出来的鱼（渔夫钩空之后那些）。
+
+    **不能像钩锁那样拿当前速度外推**：钩锁在两堵墙之间走的是直线，鱼从出水那
+    一刻起就一直在拐弯（见 states/fish.py 的 steer）。而在拐弯最厉害的那几帧，
+    它速度指的方向和它真正要去的地方差得远——偏偏那几帧就是它快咬到人的时候，
+    照速度外推会正好在那里漏掉。
+
+    所以这里按"鱼接下来是**直线扑向它此刻正在追的那个人**"来外推。追踪的路径
+    本来就是朝目标收紧的，取"朝着目标"这一阶，比取当前切线准得多：只要你就是
+    它锁的那个人，这条就会亮。
+
+    代价是它从"正在拐过来"这一刻起就报"要挨咬了"——比真咬到早一点。对这个
+    技能来说恰好是对的：刺客要的就是**早**，晚了就没有闪的余地了。
+
+    距离取半径和（鱼半径 + 自己半径），和真的咬人时那条判定一致
+    （Match.update_fishes 量的是鱼心到敌人圆面）。
+    """
+    if not other.fishes:
+        return False
+    for fish in other.fishes:
+        # 鱼追的是"放它的人眼里的敌人"，所以得拿 owner 去问，不能拿刺客自己问
+        prey = match.nearest_enemy(other, fish.position)
+        if prey is None:
+            continue
+        offset = prey.position - fish.position
+        if offset.length_squared() <= 1e-12:
+            return True
+        ahead = fish.position + offset.normalize() * (fish.speed * t)
+        if mine.distance_to(ahead) <= ball.radius + fish.radius:
+            return True
+    return False
 
 
 def _laser_hits(ball: Ball, mine: Vector2, other: Ball) -> bool:
