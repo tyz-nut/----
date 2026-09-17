@@ -548,7 +548,7 @@ PHANTOM = PhantomAssassin(
     name="幻影刺客",
     radius=22,
     max_hp=500,
-    description="预判闪现 · 贴身追砍",
+    description="预判闪现 · 乱刀连击",
     # 这是全 roster 里唯一一个**不需要玩家操作**的主动技能：冷却好之后它自己
     # 盯着场上，等预判到自己快挨打了才放（见 skills.BlinkStrikeSkill.ready）。
     # 所以技能条上会出现"冷却满了但没亮"的待发态，那不是 bug
@@ -559,13 +559,23 @@ PHANTOM = PhantomAssassin(
         react_seconds=0.32,        # 往前预判多久。**别往大里调**：预判是纯外推，
                                    # 看得越远越容易误报（比如对方其实要撞墙了）
         react_samples=8,           # 预判采几个样，见 core/predict.py
-        blink_distance=70.0,       # 闪到敌人身后多远。落在对方"运动方向的反面"
-        flash_seconds=0.14,        # 闪现那一下的暗角 + 减速持续多久
+        blink_distance=70.0,       # 每一次闪，落在离敌人多远的地方。起手那一下
+                                   # 落在对方"运动方向的反面"（咬尾巴），之后
+                                   # 每一刀都是围着敌人随机挑一个方向
+        flash_seconds=0.14,        # 每一次闪现的暗角 + 减速持续多久。连招期间
+                                   # 每刀都会重新压一次，所以它同时也是"晃不晃眼"
         slow_factor=0.22,          # 那一下把游戏速度压到几倍（和滑块是相乘的）
-        slash_seconds=10,          # 挥砍最多持续多久
-        slash_reach=110.0,         # 够得着多远的敌人算砍到
-        break_distance=170.0,      # 拉开这么远就收招，冷却开始走
-        damage_per_second=55.0,    # 挥砍每秒砍掉多少血
+        # 一套连招打几刀 = slash_seconds / blink_interval。这两个数要一起看：
+        # 它们的乘积才是一套的总时长。现在这套是 2.0 / 0.4 = 5 刀
+        slash_seconds=2.0,         # 这一套连招一共持续多久
+        blink_interval=0.4,        # 隔多久闪一下、砍一刀
+        # 一刀的伤害要乘刀数才是一套的总量（现在约 45 × 5 = 225，半管血）。
+        # 别照旧的 damage_per_second 口径去读它——那个是"每秒"，这个是"每一刀"
+        slash_damage=45.0,         # 砍一刀掉多少血
+        slash_reach=110.0,         # 挥砍弧光画多大。要 >= blink_distance，
+                                   # 不然画出来的弧盖不住真会挨砍的那个位置
+        exit_speed=300.0,          # 正常收招之后朝敌人反方向离开的速度。
+                                   # **期间被击退过的话按击退速度走**，不用这个
     ),
     # 碰撞效果：无。撞上了就是正常弹开，跟普通小球一样——它的本事全在闪现里
 )

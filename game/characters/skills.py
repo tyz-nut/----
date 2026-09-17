@@ -411,32 +411,40 @@ class BlinkStrikeSkill(Skill):
     "能放吗"，让 ready 回答"暂时还不能"就行。玩家看到的观感是"冷却完了但技能
     没亮起来，等真要被撞了才闪出去"——技能条上那一段就是待发态。
 
-    触发之后（见 Match.start_blink）：
+    触发之后（见 Match.start_blink）是一整套**连招**：
 
-    1. **闪现**到敌人**身后**一段距离（身后 = 敌人运动方向的反面）。位置是当场
-       换好的，不走过场。
-    2. 顺手**接过敌人的动量**——按对方的速度继续往前。所以它不是"闪过去站着"，
-       是"闪到对方屁股后头跟着飞"。
-    3. **持续挥砍**：只要敌人还在面前、还在够得着的范围里就一直砍。
+    1. **闪到敌人身后**一段距离（身后 = 敌人运动方向的反面），砍一刀。
+    2. 再**围着敌人随机挑一个方向**闪过去，砍一刀。
+    3. 重复第 2 步，直到 slash_seconds 走完。
 
-    结束条件有两个，谁先到算谁：挥砍时间走完，或者两人拉开了 break_distance。
-    拉开主要发生在对方撞墙改向的时候——刺客接过的是**那一刻**的动量，之后各飞
-    各的，对方一拐弯两人就分开了。
+    第 1 步和后面几步的取位不一样是有讲究的：起手是"咬尾巴"，那是"我盯上你了"
+    这个决定，得看得出来是从背后扑上去的；后面就是纯粹的乱刀，落点随机，对方
+    读不出来下一刀从哪儿来（用户定的）。
 
-    这类技能没有 duration（生效多久不由秒数决定），靠覆盖 active() 回答，和
+    **砍的时候速度为 0**（用户定的）：挥砍期间刺客定在原地，位置全靠闪现换。
+    这是它的代价——一整套乱刀必定命中（落点是刺客自己挑的），那就得拿"这几个
+    时刻我动不了"来付账。唯一的例外是**被击退**：期间要是被外力推走了，收招的
+    时候按那份速度走，而不是按常规那条"往敌人反方向离开"。
+
+    所以结束条件只剩一个：时间走完，或者目标死了。**没有"拉开距离就收招"了**
+    ——每一刀都闪到对方脸上，本来就拉不开（见 states/blink.py）。
+
+    这类技能没有 duration（生效多久由连招自己数），靠覆盖 active() 回答，和
     钩锁同类。
     """
 
     cooldown: float = 12.0
     react_seconds: float = 0.32      # 往前预判多久。越大越早触发，也越容易误报
     react_samples: int = 8           # 预判采几个样。见 core/predict.py
-    blink_distance: float = 70.0     # 闪到敌人身后多远
-    flash_seconds: float = 0.14      # 闪现那一下持续多久（暗角 + 减速跟着它走）
+    blink_distance: float = 70.0     # 每一次闪，落在离敌人多远的地方
+    flash_seconds: float = 0.14      # 每一次闪现持续多久（暗角 + 减速跟着它走）
     slow_factor: float = 0.22        # 闪现那一下把游戏速度压到几倍
-    slash_seconds: float = 1.6       # 挥砍最多持续几秒
-    slash_reach: float = 110.0       # 够得着多远才算砍到
-    break_distance: float = 170.0    # 拉开这么远就收招
-    damage_per_second: float = 55.0  # 挥砍每秒砍掉多少血
+    slash_seconds: float = 2.0       # 这一套连招一共持续几秒
+    blink_interval: float = 0.4      # 隔多久闪一下、砍一刀
+    slash_damage: float = 45.0       # 砍一刀掉多少血。**一刀一结算**，不是每秒
+    slash_reach: float = 110.0       # 挥砍弧光画多大。要 >= blink_distance，
+                                     # 不然画出来的弧盖不住真会挨砍的那个位置
+    exit_speed: float = 300.0        # 正常收招之后，朝敌人反方向离开的速度
 
     def ready(self, ball: Ball, match: Match) -> bool:
         """冷却好了也先憋着，等预判说自己快撞上了才放。"""
@@ -455,9 +463,10 @@ class BlinkStrikeSkill(Skill):
             flash_seconds=self.flash_seconds,
             slow_factor=self.slow_factor,
             slash_seconds=self.slash_seconds,
+            blink_interval=self.blink_interval,
             reach=self.slash_reach,
-            break_distance=self.break_distance,
-            damage_per_second=self.damage_per_second,
+            slash_damage=self.slash_damage,
+            exit_speed=self.exit_speed,
         )
 
 
