@@ -944,7 +944,8 @@ class Game:
         else:
             status = STATE_LABEL[self.state]
             if self.state is State.SELECT and not self.match.both_picked():
-                status += f"  {len(self.match.mains())}/{len(PLAYER_NAMES)}"
+                # 数的是**玩家**：分裂之后 mains() 是一堆碎片，照它数会显示成 8/2
+                status += f"  {len(self.match.picked_players())}/{len(PLAYER_NAMES)}"
         self.screen.blit(title.render(status, True, COLOR_TEXT), self.layout.status_pos)
 
         # 左栏下方：快捷键说明
@@ -974,14 +975,24 @@ class Game:
         )
 
     def draw_player_info(self) -> None:
-        """底栏：每个玩家的血条与技能状态。"""
+        """底栏：每个玩家的血条与技能状态。
+
+        遍历的是**玩家**而不是 mains() 里那些球：分裂之后一个玩家在场上有好几块
+        （最多八块），照着球遍历会往同一条血条上画八次，而且每画一次都是那**一块**
+        的血——血条会跳到只反映"最后画的那块碎片"。这条血条要的是**一整边的总血量**
+        （用户定的"算总血量"），所以数的是 side_hp。
+
+        技能条则取代表那一片（main_of）：这个玩家的每一块都带着同一个角色的技能，
+        但冷却各走各的（分裂那一刻抄了一份，之后各算各的）。画代表那一块是个取舍
+        ——真要说"这个玩家能不能放技能"得看每一块，条只有一条，就挑最老的那块说话。
+        """
         small = self.fonts[FONT_SMALL]
-        for ball in self.match.mains():
-            player = ball.player
+        for player in self.match.picked_players():
+            ball = self.match.main_of(player)
             hp_rect = self.layout.hp_bars[player]
             muted = tuple(round(c * BAR_FILL_MUTE) for c in ball.color)
-            draw_bar(self.screen, hp_rect, ball.hp_ratio, muted)
-            self.blit_centered(f"{ball.hp:.0f}", small, hp_rect)
+            draw_bar(self.screen, hp_rect, self.match.side_hp_ratio(player), muted)
+            self.blit_centered(f"{self.match.side_hp(player):.0f}", small, hp_rect)
 
             skill_rect = self.layout.skill_bars[player]
             text, ratio, color = self.skill_display(ball)

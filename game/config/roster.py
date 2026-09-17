@@ -274,6 +274,36 @@
   launch_speed 只决定骑士**出场那一下**有多冲。骑士之后一直按着那个速度飞
   （撞墙只改方向），所以它同时也是骑士满场跑的节奏：调快，骑士铺得到处都是、
   但撞上谁全看运气；调慢，它们会在国王身边转悠，输出反而更集中。
+
+- 分裂是**全场唯一一个玩家有多个身子的角色**，也是唯一一个把"自己人相撞"
+  用起来的：撞敌人伤固定的一笔并把自己裂成两个半身，两个**同代**的半身撞上
+  再合回一块（退一代）。规矩写在 characters/splitter.py，执行在 Match 的
+  分裂那一节。
+
+  几条会互相牵连的数：
+
+      一块 gen0 裂到最细是 8 块 gen3，每一块的大小和血量上限都是本体的 1/8 大。
+
+  **总量不变**：一块 500 血的裂成两块 250 的，合回来又是 500。所以这个角色的
+  max_hp 是"一个玩家的血池"，不是"一块身板的血"，血条画的也是池子（Match.
+  side_hp）——裂开之后血条不会跳。掉的是**每一块有多脆**：撞人时的质量口径是
+  半径的平方，裂一次就掉到四分之一，碎成八块时每一块的冲击力只剩 1.6%。
+
+  于是 hit_damage 是唯一决定"裂开值不值"的数：它是**固定值、不看代数**，所以
+  八块碎片一起蹭就是八份全额伤害。想让碎片弱一点就把它按体型缩放（改
+  splitter.on_collision），想让"裂"纯粹是坏事就别动——现在这个写法下，
+  裂开是"用单块的防御力换出手次数"，两头都给了玩家。
+
+  max_halvings 限的是**身子**不是拳头：到代的碎片照样打全额伤害，只是不再裂。
+
+  split_speed 只决定两个半身散开那一下有多冲，之后它们就按各自的动量飞。
+  调小的话两块会黏在一起走一段——它们**同代**，过了融合锁（config.
+  FUSE_LOCK_SECONDS）就会当场合回去，等于没裂。所以这个数太小会让分裂这个
+  机制自己失效，不只是"看起来没那么炸"。
+
+  融合的锁（FUSE_LOCK_SECONDS）和摆开的距离（SPLIT_SPAWN_GAP /
+  SPLIT_SPREAD_ANGLE）在 config/settings.py，不在这个文件里：它们管的是
+  "裂开那一下摆得开不开"，动它们不会改强弱，只改会不会自己把自己抵消掉。
 """
 
 from ..characters import (
@@ -304,6 +334,7 @@ from ..characters.necromancer import Necromancer
 from ..characters.normal import NormalBall
 from ..characters.samurai import Samurai
 from ..characters.spider import Spider
+from ..characters.splitter import Splitter
 from ..characters.vampire import Vampire
 from ..characters.venom import VenomSting
 from ..states.hook import FishSpec
@@ -713,8 +744,34 @@ KING = King(
     collision_self_damage=60.0,
 )
 
+# ============================================================
+# 分裂 —— 撞人裂一块，同代的半身撞一起再合回来
+# ============================================================
+SPLITTER = Splitter(
+    id="splitter",
+    name="分裂",
+    # 本体尺寸和别的角色一样（22），但它是**会被减半的那种**：裂一次 11，
+    # 两次 5.5，三次 2.75。所以这个数同时定下了"这块身板能撑几刀"和"碎到最后
+    # 还看得见吗"——改它记得连 radius 一起想（场上的球就它一个会变尺寸）
+    radius=22,
+    # **初始血量较高**（用户定的）。别的角色清一色 500，它给 1000——理由不是
+    # "更能扛"，而是它的血是**按块分的**：800 血摊在八块碎片上，每块只有 100，
+    # 一碰就碎。基础低一点的话，裂到第三代就全是灰了
+    max_hp=1000,
+    description="撞击分裂 · 同代融合",
+    # 没有主动技能：它的本事全在碰撞里，和激光、蜘蛛、大锤、望一样填 IdleSkill
+    # （ready 恒为 False，永远不会被"放"出来）
+    skill=IdleSkill(name="无", cooldown=0.0),
+    hit_damage=45.0,               # 撞上敌人固定掉这么多。**不看速度、不看代数**，
+                                   # 所以八块碎片各撞一下就是八份 45
+    max_halvings=3,                # 最多裂三次（用户定的）：gen0 → gen1 → gen2 → gen3
+    split_speed=280.0,             # 两个半身散开的速度（像素/秒）。压在出生速度
+                                   # 那一档里（220~380）。**别调太小**：两块同代
+                                   # 半身散不开的话，融合锁一过就当场合回去
+)
+
 # 顺序即右栏角色卡的排列顺序
 CHARACTERS: tuple = (
     NORMAL, VAMPIRE, FISHER, LASER, SAMURAI, SPIDER, NECROMANCER, HAMMER,
-    PHANTOM, VENOM, LOOKOUT, KING,
+    PHANTOM, VENOM, LOOKOUT, KING, SPLITTER,
 )

@@ -28,8 +28,10 @@ from ..states.go_board import GoBoard
 from ..states.hook import Hook, point_from_end, polyline_length
 from ..config.settings import (
     BALL_SPAWN_MIN_GAP,
+    BLINK_KNOCKBACK_EPSILON,
     BLINK_SWING_SPEED,
     COLOR_HOOK,
+    FUSE_LOCK_SECONDS,
     GO_BOARD_SIZE,
     HITSTOP_FACTOR,
     HOOK_RELEASE_SPEED,
@@ -38,6 +40,8 @@ from ..config.settings import (
     SEPARATION_EPSILON,
     SHAKE_EXTRA_BITE,
     SHAKE_EXTRA_SLASH,
+    SPLIT_SPAWN_GAP,
+    SPLIT_SPREAD_ANGLE,
     TIME_SCALE_DEFAULT,
 )
 
@@ -93,12 +97,12 @@ class Match:
         # 主球和召唤物的区分落在 Ball.summoned 上：胜负、换位、重开这些"只对
         # 玩家本人成立"的事按它筛（见 mains）。
         self.units: list[Ball] = []
-        # 召唤物之间的接触标记。和 touching 是同一个东西的两份：touching 是
-        # **整场一个**bool，因为主球只有两颗，一场只可能有一对。召唤物一来就有
-        # 好几对，共用一个 bool 会让其中一对贴上压制住其它所有对的结算。
+        # 场上**贴在一起的球对**。原来叫 summon_contacts，只记带召唤物的那些
+        # 对——主球只有两颗、整场只可能有一对，一个 bool（touching）就够。
+        # 现在一个玩家可能有好几块（分裂），"一对一个标记"对全场成立，所以
+        # 这份名单管所有对，bool 那一份退役了。
         # 存的是两颗球的 uid（见 Ball.uid），小号在前
-        self.summon_contacts: set[tuple[int, int]] = set()
-        self.touching = False              # 上一帧两球是否已经贴在一起
+        self.contacts: set[tuple[int, int]] = set()
         self.latch: Latch | None = None    # 当前粘在一起的两球
         # 正在降临的黑夜。和 latch 一样是**全场**的东西，不属于哪一颗球——
         # 它盖的是整块战场，顺带把双方的位置和血量对调（见 update_darkness）。
@@ -134,21 +138,60 @@ class Match:
         return [ball for ball in self.units if ball.summoned]
 
     def mains(self) -> list[Ball]:
-        """场上那两颗**玩家本人的球**，按玩家序号排。
+        """场上所有**玩家本人的球**，按玩家序号排。
 
         胜负、黑夜换位、重开、选人问的都是它：这几件事只对"玩家选的那个角色
-        本人"成立，跟召唤物没关系（骑士死光不算输）。按序号排是为了让"第一颗
-        是玩家 1、第二颗是玩家 2"这个顺序稳定——换位、穿刺瞄准都等着解包它。
+        本人"成立，跟召唤物没关系（骑士死光不算输）。
+
+        **它是一列，不一定两颗**：早先一个玩家一颗球，所以到处都在解包
+        `first, second = self.mains()`。分裂一来，一个玩家在场上是好几块
+        （gen0 裂成两块 gen1，再各裂成两块 gen2……最多八块），解包就崩了。
+        凡是要"一个玩家挑一颗代表"的地方，改用 main_of。
         """
         return sorted((ball for ball in self.units if not ball.summoned),
-                      key=lambda ball: ball.player)
+                      key=lambda ball: (ball.player, ball.uid))
+
+    def bodies(self, player: int) -> list[Ball]:
+        """某个玩家在场上的**全部己方身体**：本体 + 分裂出来的半身。
+
+        **不筛死活**：两边的用处不一样——血条要的是"活着的加起来"（见
+        side_hp），黑夜换血要的是"一共有几块、各是多大"。筛不筛由调用方说了算。
+        """
+        return [ball for ball in self.units
+                if not ball.summoned and ball.player == player]
+
+    def picked_players(self) -> list[int]:
+        """已经选好角色的玩家序号。"""
+        return sorted({ball.player for ball in self.mains()})
 
     def main_of(self, player: int) -> Ball | None:
-        """某个玩家本人的那颗球。还没选角色时为 None。"""
+        """某个玩家**代表那一颗**球（uid 最小的那块，也就是本体或最老的一代）。
+        还没选角色时为 None。
+
+        只该用在"一个玩家要挑一颗出来"的地方（血条、技能条、重开造球），
+        不能拿它代表这个玩家的全部身家——分裂之后他的血散在好几块上，
+        问总量要走 side_hp。
+        """
         for ball in self.units:
             if not ball.summoned and ball.player == player:
                 return ball
         return None
+
+    def side_hp(self, player: int) -> float:
+        """这一边现在一共多少血：**所有活着的块加起来**（用户定的"算总血量"）。"""
+        return sum(ball.hp for ball in self.bodies(player) if ball.alive)
+
+    def side_hp_ratio(self, player: int) -> float:
+        """这一边还剩几成血，0~1。
+
+        分母取**角色的 max_hp**，不是"当前这些块的上限之和"：分裂和融合都不改
+        总量（一块 500 的裂成两块 250，合回来又是 500），所以角色那个数一直是
+        这个玩家的满血线。用它当分母，血条就不会因为裂了一次而跳一下。
+        """
+        main = self.main_of(player)
+        if main is None or main.character.max_hp <= 0:
+            return 0.0
+        return max(0.0, min(1.0, self.side_hp(player) / main.character.max_hp))
 
     @staticmethod
     def same_side(owner: Ball, target: Ball) -> bool:
@@ -167,7 +210,8 @@ class Match:
 
     # ---------------- 组装 ----------------
     def both_picked(self) -> bool:
-        return len(self.mains()) == len(PLAYER_NAMES)
+        # 数的是**玩家**不是球：一个玩家分裂成八块也还是一个人选好了
+        return len(self.picked_players()) == len(PLAYER_NAMES)
 
     def pick(self, player: int, character: Character) -> None:
         """给某个玩家换上角色，在场上随机位置满血生成。"""
@@ -181,17 +225,20 @@ class Match:
         """保留已选角色，重新随机位置与动量；血量、技能、胜负全部复位。"""
         placed: list[Ball] = []
         rebuilt: list[Ball] = []
-        for ball in self.mains():
-            fresh = self._spawn(ball.player, ball.character, placed)
+        # **一个玩家只重建一块**，而且重建的是本体（满血满尺寸）。照着 mains()
+        # 一颗一颗来是不行的：上一局裂出来的半身也在那一列里，重开会照着一堆
+        # 半身造出一堆半身，开局就是八块碎片
+        for player in self.picked_players():
+            ball = self.main_of(player)
+            fresh = self._spawn(player, ball.character, placed)
             rebuilt.append(fresh)
             placed.append(fresh)
-        # 只留下重建的两颗主球：上一局的召唤物跟着 reset_outcome 一起勾销
+        # 只留下重建的那些：上一局的召唤物跟着 reset_outcome 一起勾销
         self.units = rebuilt
         self.reset_outcome()
 
     def reset_outcome(self) -> None:
-        self.touching = False
-        self.summon_contacts.clear()
+        self.contacts.clear()
         # 召唤物和场上那些账本一样要一笔勾销：它是上一局那个国王召出来的，
         # 换角色、重开之后场上不该还飞着别人的兵
         self.units = [ball for ball in self.units if not ball.summoned]
@@ -257,17 +304,17 @@ class Match:
             self.time_scale.push("hitstop", HITSTOP_FACTOR)
 
     def opponent(self, ball: Ball) -> Ball | None:
-        """对面**本人的那颗球**——不是"随便另一颗球"。
+        """对面**离它最近的那一块**——不是"随便另一颗球"。
 
         召唤物不算数：瞄准、穿刺、闪现这一路"我要冲谁"的决定冲的都是对方本人，
         骑士是挡在路上的东西、不是目标（见 direction_to_opponent）。场上只剩
         自己时是 None（正常对局走不到，但技能别因此炸掉）。
+
+        **取最近的**：一个玩家只有一颗球时无所谓远近（原来就是直接拿那一颗），
+        分裂之后对面可能有好几块，这时候"最近的那一块"才是瞄准真正要问的问题
+        ——冲场上最远的那块碎片纯属浪费一次冷却。
         """
-        for other in self.units:
-            if other.summoned or other.player == ball.player:
-                continue
-            return other
-        return None
+        return self.nearest_enemy(ball, ball.position)
 
     def _others(self, player: int) -> list[Ball]:
         """别的玩家本人的球。排出生点用——召唤物不参与，它们不占位置上的坑。"""
@@ -369,10 +416,8 @@ class Match:
                 ball.update(dt)
 
         self.cast_ready_skills()
-        self.resolve_collision()
-        # 胜负已分就不再碰骑士：那一下已经打完了，多结算一轮只会让尸体再挨一下
-        if not self.finished:
-            self.resolve_summons_collisions()
+        # 碰撞只有这一趟，主球、骑士、分裂出来的半身全在里面（见 resolve_collisions）
+        self.resolve_collisions()
         if self.latch is not None:
             # 这一帧刚吸上。不能再走各自的撞墙判定——那会把粘住的一对拆开，
             # 但这一对的边界还是得守（见 correct_latch_walls）
@@ -705,8 +750,8 @@ class Match:
         # 松手即解封（见 hook_hit）。和吸住一样：绑多久封多久，解封是施加方的事
         victim.unsilence()
         owner.finish_skill()
-        # 推完之后两人是分开的，复位接触标记；否则下一次真撞上会被当成"还贴着"漏掉
-        self.touching = False
+        # 推完之后两人是分开的，清掉接触标记；否则下一次真撞上会被当成"还贴着"漏掉
+        self.forget_contact(owner, victim)
 
     def pulled_pair(self) -> tuple[Ball, Ball] | None:
         """当前正被钩锁往回拖的那一对（渔夫, 敌人），没有则为 None。"""
@@ -929,12 +974,14 @@ class Match:
     # ---------------- 闪现突袭 ----------------
     def start_blink(self, ball: Ball, target: Ball, distance: float,
                     flash_seconds: float, slow_factor: float,
-                    slash_seconds: float, reach: float,
-                    break_distance: float, damage_per_second: float) -> None:
-        """闪到目标身后一段距离，接过它的动量，开始挥砍。
+                    slash_seconds: float, blink_interval: float,
+                    reach: float, slash_damage: float,
+                    exit_speed: float) -> None:
+        """起手：闪到目标**身后**一段距离，砍第一刀，然后开始数连招的钟。
 
         "身后"取的是**敌人运动方向的反面**（target.heading），不是"相对刺客的
-        另一侧"。所以它是咬尾巴，不是穿过去：敌人往哪飞，刺客就落在它屁股后头。
+        另一侧"。所以起手是咬尾巴，不是穿过去：敌人往哪飞，刺客就落在它屁股后头。
+        后面每一刀的落点则是随机挑的（见 blink_to_side），只有这第一下有讲究。
 
         落点用 heading 而不是速度矢量，是因为两球正面对撞后速度可能被清成 0
         ——那种时候 heading 还留着上一帧的朝向，是唯一还有意义的方向（见
@@ -944,48 +991,94 @@ class Match:
         位置在技能放出来这一帧就已经到了。演出比位移长一点是有意的——"闪过去
         了"这件事得有个能被看见的瞬间。
 
-        还要把位置夹回场内：敌人贴着墙的时候，它屁股后头就是墙外。
+        **挥砍期间速度为 0**（用户定的）：刺客定在原地，位置全靠闪现换。所以
+        这里先把速度摁掉，之后每一帧 update_blinks 都会再摁一次——碰撞那几趟
+        跑在位移之后，不每帧摁的话会被上一帧的弹开速度推着走。
         """
-        behind = target.position - target.heading * distance
-        ball.position.update(behind)
-        self.arena.clamp_inside(ball.position, ball.radius)
-
-        # 接过敌人的动量。之后各飞各的——对方撞墙改向时两人就分开了，这正是
-        # break_distance 那条结束条件的主要来源
-        ball.set_effective_velocity(target.effective_velocity)
-
-        facing = target.position - ball.position
-        if facing.length_squared() > 1e-9:
-            facing = facing.normalize()
-        else:
-            facing = Vector2(target.heading)
-
-        # 起手那一下额外震一份：闪现本身不造成伤害，走不到"命中"那条路上，
-        # 但它是这个技能最重的一瞬——和闪现的暗角、减速是同一时刻的三件事
-        self.effects.hits.jolt(SHAKE_EXTRA_SLASH)
-
-        ball.blink = BlinkStrike(
+        strike = BlinkStrike(
             target=target,
-            facing=facing,
+            facing=Vector2(1.0, 0.0),
             slash_remaining=slash_seconds,
             slash_total=slash_seconds,
             flash_remaining=flash_seconds,
             flash_total=flash_seconds,
             slow_factor=slow_factor,
-            damage_per_second=damage_per_second,
+            slash_damage=slash_damage,
+            blink_distance=distance,
+            blink_interval=blink_interval,
+            next_blink=blink_interval,
+            exit_speed=exit_speed,
             reach=reach,
-            break_distance=break_distance,
         )
+        ball.blink = strike
+
+        behind = target.position - target.heading * distance
+        ball.position.update(behind)
+        self.arena.clamp_inside(ball.position, ball.radius)
+        ball.set_effective_velocity(Vector2(0.0, 0.0))
+
+        # 起手那一下也**要砍**（"闪到对方身边后砍一刀"），所以这条共享的路
+        # 直接走一遍：摆朝向、压暗角、结算伤害。区别只是落点已经摆好了，
+        # 这里不重新挑位置
+        self.slash_from_here(ball, target, strike)
+
+    def blink_to_side(self, ball: Ball, target: Ball, strike: BlinkStrike) -> None:
+        """闪到目标**周围随机一个方向**上，然后砍一刀。
+
+        随机取整圈（不是"接着上一个落点转一点"）：用户要的就是"读不出下一刀
+        从哪来"。按固定角速度绕着转的话，对方看两刀就能预判第三刀的位置了。
+        """
+        angle = random.uniform(0.0, math.tau)
+        landing = target.position + Vector2(math.cos(angle), math.sin(angle))             * strike.blink_distance
+        ball.position.update(landing)
+        self.arena.clamp_inside(ball.position, ball.radius)
+        self.slash_from_here(ball, target, strike)
+
+    def slash_from_here(self, ball: Ball, target: Ball, strike: BlinkStrike) -> None:
+        """站在当前位置砍一刀：摆朝向、重新压一次暗角、结算伤害。
+
+        朝向是"从这里指向敌人"，所以挥砍的弧永远盖在敌人身上。这一条同时替掉了
+        原来那个"敌人还在不在面前"的判定（blink_in_reach）——落点是刺客自己挑
+        的，每次都在敌人身边，没有"砍空"这一说了。
+
+        暗角**每一刀都重新压一次**：一套连招看下来就是"闪一下、闪一下、闪一下"，
+        而不是只有起手黑一次。代价是时间倍速被反复压低（见 begin_frame），嫌
+        晃眼就把 flash_seconds 调短——它是这两个效果共用的那个数。
+        """
+        offset = target.position - ball.position
+        if offset.length_squared() > 1e-9:
+            strike.facing = offset.normalize()
+        strike.flash_remaining = strike.flash_total
+
+        if target.alive:
+            target.take_damage(strike.slash_damage)
+            self.effects.hits.strike(Hit.on(
+                ball, target, strike.slash_damage,
+                speed=strike.blink_distance / max(strike.blink_interval, 1e-6),
+            ))
+        # 起手那一下额外震一份：闪现走不到"命中"那条路上（它是瞬移，没有飞行
+        # 过程），但它是这个技能最重的一瞬——和闪现的暗角、减速是同一时刻的三件事
+        self.effects.hits.jolt(SHAKE_EXTRA_SLASH)
+        strike.slashes += 1
+        self.judge()
 
     def update_blinks(self, dt: float) -> None:
-        """推进闪现突袭：够得着就一直砍，砍不动了或时间到了就收招。
+        """推进闪现突袭：数着钟闪过去砍一刀，时间走完就收招。
 
         和光环、激光、蛛丝同一批：都是"场上的东西每帧对球做什么"。放在吸住/
         钩锁的提前返回之前，所以被吸住、被拖着的人也照样会被砍——刺客已经贴上
         去了，跟谁在动没关系。
 
-        掉血走 effects.drain_damage（红字、攒着报），和吸血同一路：都是每帧
-        结算的持续伤害，一帧飘一个数字会糊成一片。
+        ## 速度为 0 和"被击退"是怎么共存的
+
+        每一帧在这里把速度摁回 0，于是位移那一步它一动不动。但**碰撞那几趟跑在
+        位移之后**（见 Match.update），所以这一帧结束时它身上可能留着一份碰撞
+        或锤子打上来的速度。于是下一帧进到这里、还没摁之前读到的那个值，就是
+        "上一帧有没有人把它推走"，读到了就记进 strike.knockback。
+
+        用"读上一帧残留"而不是去碰撞那几处打标记，是因为推它的来源有好几个
+        （球撞球、锤子打飞、以后可能还有别的），一处一处挂标记迟早会漏一个；
+        而"这一帧结束时它身上有多少速度"是它们的**共同结果**，一个数就够。
         """
         for ball in self.combatants():
             strike = ball.blink
@@ -998,45 +1091,57 @@ class Match:
 
             target = strike.target
             if target is None or not target.alive or not ball.alive:
-                ball.finish_skill()
+                self.finish_blink(ball, strike)
                 continue
 
-            # 先判"还够不够得着"，再砍。分开判和拉开判是两回事：分开是收招，
-            # 够不着只是这一帧砍空——站在够得着和分开之间那一小段距离上时，
-            # 刺客还在挥，只是砍不到人
-            if self.blink_broken(ball, target, strike):
-                ball.finish_skill()
-                continue
+            knocked = ball.effective_velocity
+            if knocked.length() >= BLINK_KNOCKBACK_EPSILON:
+                strike.knockback = Vector2(knocked)
+            ball.set_effective_velocity(Vector2(0.0, 0.0))
+
+            strike.next_blink -= dt
+            if strike.next_blink <= 0.0:
+                # 用 += 而不是 = interval：这一帧超出的那一点留到下一轮，闪的
+                # 节奏才不会被帧长带偏（同 Ball.tick 里数冷却的写法）
+                strike.next_blink += strike.blink_interval
+                self.blink_to_side(ball, target, strike)
+                if self.finished:
+                    # 这一刀把目标砍死了，连招到此为止
+                    continue
 
             strike.slash_remaining = max(0.0, strike.slash_remaining - dt)
-            if self.blink_in_reach(ball, target, strike):
-                dealt = strike.damage_per_second * dt
-                target.take_damage(dealt)
-                self.effects.drain_damage(target.player, target.position, dealt)
-
             if strike.slash_remaining <= 0.0:
-                ball.finish_skill()
+                self.finish_blink(ball, strike)
         self.judge()
 
-    def blink_in_reach(self, ball: Ball, target: Ball, strike: BlinkStrike) -> bool:
-        """敌人还在**面前**、还在够得着的范围里吗。
+    def finish_blink(self, ball: Ball, strike: BlinkStrike) -> None:
+        """收招：按"往敌人反方向离开"或者"被击退的那份速度"把动量还回去。
 
-        "面前"用的是闪现那一刻定死的 facing，不跟着敌人转：所以对方拐到刺客
-        身后之后就砍不到了。这一条加上 reach，就是"持续挥砍面前敌人"里的
-        "面前"两个字落地的地方。
+        两种走法（用户定的）：
+
+        - **正常收招**：朝敌人**反方向**离开，速度取 exit_speed。踉跄退开一步，
+          不是停在原地——一颗速度归零的球在这游戏里等于废了（它没有自推能力，
+          会一直杵在那儿）。
+        - **期间被击退过**：按那份速度走，方向大小原样。挨了一锤还按原计划
+          飘走就太假了。
+
+        目标死了或者找不到的时候也没法算"反方向"，退回自己的朝向——总之得给一个
+        非零速度出去。
         """
-        offset = target.position - ball.position
-        if offset.length() > strike.reach:
-            return False
-        return offset.dot(strike.facing) > 0.0
-
-    def blink_broken(self, ball: Ball, target: Ball, strike: BlinkStrike) -> bool:
-        """拉开太远，这一套该收了。
-
-        刺客接过的是敌人**那一刻**的动量，之后两人各飞各的，所以对方一撞墙
-        改向，距离就会越拉越大。这就是"分开一定距离后开始冷却"那条。
-        """
-        return ball.position.distance_to(target.position) > strike.break_distance
+        ball.blink = None
+        target = strike.target
+        if strike.knockback is not None and strike.knockback.length() > 1e-9:
+            ball.set_effective_velocity(Vector2(strike.knockback))
+        elif target is not None:
+            away = ball.position - target.position
+            if away.length_squared() > 1e-9:
+                away = away.normalize()
+            else:
+                away = Vector2(ball.heading)
+            ball.set_effective_velocity(away * strike.exit_speed)
+        else:
+            ball.set_effective_velocity(Vector2(ball.heading) * strike.exit_speed)
+        ball.finish_skill()
 
     # ---------------- 黑夜降临 ----------------
     def start_darkness(self, total: float, caster: Ball | None,
@@ -1068,10 +1173,11 @@ class Match:
             darkness.swapped = True
             # 已经分出胜负就不再换位：对面可能已经死了，把 0 血换过来会连带
             # 把赢家也拖成 0，一场明明打赢了的对局变成平局。
-            # 不足两颗主球也没什么可换的（技能是和选人绑的，正常走不到这儿）。
-            # 数的是主球：换位换的是"玩家本人那两颗"，骑士不参与
-            pairs = self.mains()
-            if len(pairs) >= 2 and all(ball.alive for ball in pairs):
+            # 不足两个玩家也没什么可换的（技能是和选人绑的，正常走不到这儿）。
+            # 数的是**人**：换位换的是"玩家本人那些球"，骑士不参与
+            sides = set(self.picked_players())
+            living = {ball.player for ball in self.mains() if ball.alive}
+            if len(sides) >= 2 and living == sides:
                 self.nightfall_swap(darkness.caster)
         if darkness.finished:
             self.darkness = None
@@ -1084,8 +1190,10 @@ class Match:
         所以这不是一个"每冷却好就白拿一次"的位移技，是一个**翻盘**手段——
         残血的时候放才有意义，健康的时候放等于浪费一次冷却。
 
-        血量换的是百分比（两个角色的 max_hp 不保证一样大，直接对调数值会爆表，
-        见 Ball.hp_ratio）。
+        血量换的是百分比（两个角色的 max_hp 不保证一样大，直接对调数值会爆表），
+        而且量的是**一整边**的总血量百分比（见 side_hp_ratio）：分裂之后血散在
+        好几块上，只换代表那一块的话，一块碎片就能把整个换血搅乱。换完每一边
+        各自按自己那些块的上限摊回去，一块一块地兑现。
 
         位置要挑人换：位置正在被"摆"的一方动不了，硬换等于把它从控制里拽出来。
         用户定下的规则是三种情况不换：
@@ -1097,24 +1205,39 @@ class Match:
 
         穿刺不在此列：它只是"这颗球自己沿着一个方向在走"，位置还是自己的，
         而且打没打中是每帧实时判距离的（见 check_thrust_hit），换完接着冲就是。
+
+        分裂过来的那一堆还多一条：**哪一边不止一块，位置就不换**（只换血）。
+        换位要的是"我看见的那个场面整个对调"，好几块碎片没法整体搬过去——摆到
+        对方的位置上要么散架要么叠成一团。这和上面那三条是同一条原则：位置摆
+        不下的一方不动，血照换。
         """
-        first, second = self.mains()
-        mine = caster
-        theirs = second if mine is first else first
+        enemy = self.opponent(caster)
+        if enemy is None:
+            return
+        mine = self.bodies(caster.player)
+        theirs = self.bodies(enemy.player)
 
         # 放的人没落后就什么都不换：黑屏已经黑过了，但场面原样不动。
         # 平手也算"没落后"——不换，免得两边同时残血时互相刷
-        if mine.hp_ratio >= theirs.hp_ratio:
+        my_ratio = self.side_hp_ratio(caster.player)
+        their_ratio = self.side_hp_ratio(enemy.player)
+        if my_ratio >= their_ratio:
             return
 
-        if not (self.has_super_armor(first) or self.has_super_armor(second)):
-            first.position, second.position = (
-                Vector2(second.position), Vector2(first.position)
+        if len(mine) == 1 and len(theirs) == 1 \
+                and not (self.has_super_armor(mine[0]) or self.has_super_armor(theirs[0])):
+            mine[0].position, theirs[0].position = (
+                Vector2(theirs[0].position), Vector2(mine[0].position)
             )
 
-        first_ratio, second_ratio = first.hp_ratio, second.hp_ratio
-        first.hp = second_ratio * first.character.max_hp
-        second.hp = first_ratio * second.character.max_hp
+        # 死了的那些块不参与兑现（换血不该把尸体救活）。所以拿到的那一份是按
+        # **活着的那些块**的上限摊开的，总缺口留在已经失去的那块上
+        for ball in mine:
+            if ball.alive:
+                ball.hp = their_ratio * ball.max_hp
+        for ball in theirs:
+            if ball.alive:
+                ball.hp = my_ratio * ball.max_hp
 
     def has_super_armor(self, ball: Ball) -> bool:
         """这颗球现在是不是**霸体**：位置不由自己说了算。
@@ -1470,110 +1593,57 @@ class Match:
         return Vector2(ball.heading)
 
     # ---------------- 碰撞 ----------------
-    def resolve_collision(self) -> None:
-        """两球相撞。发生什么由角色主张，Match 只负责执行。"""
-        pair = self.mains()
-        if len(pair) < 2:
-            self.touching = False
-            return
+    def resolve_collisions(self) -> None:
+        """场上一对一对地结账。**所有球走同一条路**。
 
-        first, second = pair
-        offset = second.position - first.position
-        minimum = first.radius + second.radius
+        原来分两趟：主球对一趟（resolve_collision），带召唤物的那些对另一趟
+        （resolve_summons_collisions）。那个分法是被"两颗主球"逼出来的——主球
+        那一趟从头到尾把两球解包成 first/second（问钩锁有没有拽着这一对、问
+        霸体、要抓就把这一对绑起来），多一颗球就进不去。
 
-        if offset.length_squared() >= minimum * minimum:
-            self.touching = False
-            return
+        分裂一来，"一个玩家好几颗球"成了常态，主球那一趟自己也解不了包了。
+        于是合成一条通用的路：**每一对都问一遍角色**，能发生什么由主张决定，
+        而不是由"这颗球是主球还是召唤物"决定。原来那些分野随之消失——骑士能
+        被抓吗？能，但骑士的主张里没有 grab，所以不会发生；召唤物是霸体吗？
+        不是，所以它照样推得动。规矩一条没改，只是不再靠名单提前切断。
 
-        distance = offset.length()
-        # 两球正好重合时法线无从谈起，随便挑一个方向把它们推开
-        normal = offset / distance if distance > 0 else Vector2(1.0, 0.0)
+        三条规矩原样保留：
 
-        if self._is_pulled_pair(first, second) or first.thrust or second.thrust:
-            # 钩锁正把对方拖过来、或者有人正冲过去——这两种情况下两球都不算碰撞。
-            # 拖的时候不算，是免得拖到身前那一瞬间先互撞一下白扣一次血。冲的时候
-            # 不算，是"穿刺这一下由穿刺自己结算"：伤害、停在哪，都在
-            # update_thrusts 里定好了，碰撞再来插一脚就是重复结算。
-            # 接触标记一并复位，好在结束后重新开始算"刚贴上"
-            self.touching = False
-            return
+        - **同边只撞不伤**：不问主张就不会有伤害、抓取、沉默（Character.
+          same_side_collisions 是唯一那个开口的特例，分裂要用）。
+        - **抓取照常**：Latch 是"两球粘成一团"，谁想抓谁主张。
+        - **每帧只挑"刚贴上"的那些对结算一次**，剩下的只做分离。一对一个
+          标记，存的是两颗球的 uid（见 Match.contacts）——主球时代整场只可能
+          有一对、一个 bool 就够，现在球有好几颗，共用一个 bool 会让其中一对
+          贴上时压制住其它所有对的结算。
+        """
+        units = self.combatants()
+        contacts: set[tuple[int, int]] = set()
+        for index, first in enumerate(units):
+            for second in units[index + 1:]:
+                if not (first.alive and second.alive):
+                    continue
+                offset = second.position - first.position
+                minimum = first.radius + second.radius
+                if offset.length_squared() >= minimum * minimum:
+                    continue
 
-        # 效果只在"刚贴上"的那一帧结算一次。没有这个标记的话，
-        # 两球重叠期间每一帧都会再互扣一次血。
-        if self.touching:
-            self.separate(first, second, normal, distance, minimum)
-            return
-        self.touching = True
+                distance = offset.length()
+                # 正重合时法线无从谈起，随便挑一个方向把它们推开
+                normal = offset / distance if distance > 0 else Vector2(1.0, 0.0)
+                key = (min(first.uid, second.uid), max(first.uid, second.uid))
+                contacts.add(key)
+                changed = self.bump(first, second, normal, distance, minimum,
+                                    fresh=key not in self.contacts)
+                if changed:
+                    # 分裂或融合把场上的阵容换了：手上这份快照里还躺着已经被
+                    # 换掉的那两颗球，接着往下走就是对着空气算账。清空接触名单、
+                    # 这一帧到此为止——下一帧重新取快照、重新判"刚贴上"
+                    self.contacts = set()
+                    return
 
-        # 先问双方各自的主张。必须在弹开之前问：撞击伤害读的是"撞上去那一瞬间"的速度
-        first_wants = first.character.on_collision(first, second)
-        second_wants = second.character.on_collision(second, first)
-
-        # 撞击伤害只要撞上就结算。抓取只顶替"弹开"，不免除伤害——
-        # 所以被抓住的一方在被抓住的那一瞬间仍然打得出这一下。
-        #
-        # 每一方身上落**两笔**：对方主张打过来的那一笔，和自己主张里"自损"的
-        # 那一笔（国王就是靠后者变成"撞上去是亏的"）。两笔都是各自算好的数，
-        # 这里只管往下砸
-        second.take_damage(first_wants.damage_to_other)
-        first.take_damage(first_wants.damage_to_self)
-        first.take_damage(second_wants.damage_to_other)
-        second.take_damage(second_wants.damage_to_self)
-        # 撞得有多快取**相对速度**：两球各自多快不重要，合起来撞得狠不狠才重要，
-        # 所以迎面对冲能撞出最大那一下。这一下也是全场唯一会顿帧的命中。
-        # 飘的数字是每一方这一撞总共掉了多少，两笔加在一起——不然国王那一边
-        # 只飘出"对方打来的 20"，血条却掉了 65
-        self.effects.hits.strike(Hit.between(
-            first, second,
-            first_takes=second_wants.damage_to_other + first_wants.damage_to_self,
-            second_takes=first_wants.damage_to_other + second_wants.damage_to_self,
-            speed=(first.effective_velocity - second.effective_velocity).length(),
-        ))
-        self.judge()
-        if self.finished:
-            # 有人被这一下打死了，弹开还是吸住都不必再谈
-            self.separate(first, second, normal, distance, minimum)
-            return
-
-        # 抓取：不弹开，改成粘住持续吸取。排在霸体**前面**——霸体挡的是"被推动"，
-        # 不是"被碰上"：抓取本身照常发生，只是抓到手之后两边都动不了
-        # （见 combined_velocity：推不动的一方等效无穷大质量，合体速度由它说了算）
-        if first_wants.grabs or second_wants.grabs:
-            grabber, victim, wants = (
-                (first, second, first_wants) if first_wants.grabs
-                else (second, first, second_wants)
-            )
-            # 先摆到刚好相切，吸住期间就保持这个姿势。霸体的一方不让路，
-            # 所以这一步的位移全由抓人的一方走完
-            self.separate(first, second, normal, distance, minimum)
-            self.start_latch(grabber, victim, wants.grab_seconds,
-                             wants.grab_drain_per_second, silences=wants.silences)
-            return
-
-        # 霸体：定住的一方推不动，撞上来的一方原路弹回。
-        # 走到这里说明没人想抓（谁都抓的话上面那条就返回了），所以这是
-        # "普通撞击撞上霸体"的情形
-        if first.frozen or second.frozen:
-            self.reflect_off(first, second, normal, distance, minimum)
-            return
-
-        # 走到这里说明双方都不抓。此时 silences 一概不生效——沉默没有时长，
-        # 必须有人负责解封，而"撞一下"这件事本身没有结束时刻，封了就没人解得开。
-        # 所以从碰撞来的沉默只跟抓取配着用（绑多久就封多久）。想只封不绑，
-        # 只能由技能来给：技能有生命周期，能在该结束的时候自己 unsilence。
-
-        # 等质量弹性碰撞：沿法线的速度分量互换。
-        # 先把两个速度取出来再写回，否则第二行算的是已经被改过的 first。
-        first_velocity = first.effective_velocity
-        second_velocity = second.effective_velocity
-        first.set_effective_velocity(
-            first_velocity - (first_velocity - second_velocity).dot(normal) * normal
-        )
-        second.set_effective_velocity(
-            second_velocity - (second_velocity - first_velocity).dot(normal) * normal
-        )
-
-        self.separate(first, second, normal, distance, minimum)
+        # 整份名单换掉而不是往里加：这一帧没挨着的对，下一帧再贴上要重新算"刚贴上"
+        self.contacts = contacts
 
     def reflect_off(self, first: Ball, second: Ball, normal: Vector2,
                     distance: float, minimum: float) -> None:
@@ -1609,90 +1679,123 @@ class Match:
             first.position -= normal * push
             second.position += normal * push
 
-    # ---------------- 骑士的碰撞 ----------------
-    def resolve_summons_collisions(self) -> None:
-        """骑士参与的那些碰撞：骑士互撞、骑士撞球。
+    def forget_contact(self, first: Ball, second: Ball) -> None:
+        """把这一对从"贴着"的名单里划掉。
 
-        为什么不在 resolve_collision 里顺手办掉：那一趟从头到尾都在处理**两颗
-        主球**——它把两颗主球解包成 first/second、问钩锁有没有拽着这一对、问霸体、
-        要抓就把这一对绑起来。那套东西是照着"这一局只有这两颗"写的，多一颗球就
-        进不去。所以带召唤物的那些对单独一趟，两边各管各的，互不重叠（一对里只要
-        有召唤物就归这趟）。
-
-        三条规矩（用户定的一起对上）：
-
-        - **自己人只撞不伤**。国王和它的骑士、骑士和骑士，撞上照常弹开，但
-          on_collision 一概不问——不问就自然不会有伤害，也不会有抓取和沉默。
-        - **撞敌人照常主张**。骑士打人很疼、自己也掉一点（见 characters/knight.py），
-          国王打人很轻、自己掉很多（见 characters/king.py），两个方向都算。
-        - 抓取**不生效**：Latch 是"吸住一串连体位移"的机制，要的是一对稳定的两人组，
-          召唤物进来会把合体速度、霸体、黑夜换位那一整套搅乱。所以这里只取主张里
-          的伤害，grabs / silences 丢掉。
-
-        每帧只挑出"刚贴上"的那些对结算一次，剩下的只做分离——和 resolve_collision
-        里那个 touching 是同一件事。区别是这里要**一对一个标记**：主球只有两颗、
-        整场只可能有一对，所以那边一个 bool 就够；召唤物有好几颗，共用一个 bool
-        会让其中一对贴上时压制住其它所有对的结算（summon_contacts 就是那份名单，
-        存的是球的 uid）。
+        钩锁松手、吸住松口这两处要主动调：那一刻两球**仍然**是相切的（是被人
+        摆成那样的），不划掉的话下一次真撞上会被当成"还贴着"而漏掉一整次伤害。
+        名单本身每帧重算（见 resolve_collisions），所以正常分开的两球不用管。
         """
-        summon_uids = {unit.uid for unit in self.summons()}
-        if not summon_uids:
-            self.summon_contacts.clear()
-            return
-
-        units = self.combatants()
-        touching: set[tuple[int, int]] = set()
-        for index, first in enumerate(units):
-            for second in units[index + 1:]:
-                # 两颗主球之间那一下归 resolve_collision，这里只认带召唤物的对
-                if first.uid not in summon_uids and second.uid not in summon_uids:
-                    continue
-                if not (first.alive and second.alive):
-                    continue
-                offset = second.position - first.position
-                minimum = first.radius + second.radius
-                if offset.length_squared() >= minimum * minimum:
-                    continue
-
-                distance = offset.length()
-                # 正重合时法线无从谈起，随便挑一个方向把它们推开（同 resolve_collision）
-                normal = offset / distance if distance > 0 else Vector2(1.0, 0.0)
-                key = (min(first.uid, second.uid), max(first.uid, second.uid))
-                touching.add(key)
-                self.bump(first, second, normal, distance, minimum,
-                          fresh=key not in self.summon_contacts)
-
-        # 整份名单换掉而不是往里加：这一帧没挨着的对，下一帧再贴上要重新算"刚贴上"
-        self.summon_contacts = touching
+        self.contacts.discard(
+            (min(first.uid, second.uid), max(first.uid, second.uid))
+        )
 
     def bump(self, first: Ball, second: Ball, normal: Vector2, distance: float,
-             minimum: float, fresh: bool) -> None:
-        """召唤物那一趟里的一对相撞。fresh 是"这一对是不是这一帧才贴上的"。
+             minimum: float, fresh: bool) -> bool:
+        """一对相撞。fresh 是"这一对是不是这一帧才贴上的"。
 
-        弹开走的是和主球一样的等质量弹性碰撞（沿法线的分量互换），没按半径算
-        质量——主球那边也是这么写的，两边保持一致比"更物理一点"重要。
+        返回 True 表示**这一撞把场上的阵容换了**（分裂或者融合）。调用方那一趟
+        到此为止，理由写在 resolve_collisions 里。
 
-        霸体的一方不参与换速度（它的速度不由自己说了算，换了也白换），分离那
-        一步由 separate 处理——它认 frozen，会把该走的位移全给另一边。
+        弹开走的是等质量弹性碰撞（沿法线的速度分量互换），没按半径算质量——
+        更物理一点当然也可以（黑体上确实是按半径平方），但场上能推的球就只有
+        主球和骑士那两种量级，按半径算的差别肉眼看不出来，而"两边写着同一套"
+        是有价值的：霸体的处理、分离的处理、抓取的处理全都只写一遍。
         """
-        if fresh and not self.same_side(first, second):
-            first_wants = first.character.on_collision(first, second)
-            second_wants = second.character.on_collision(second, first)
-            second.take_damage(first_wants.damage_to_other)
-            first.take_damage(first_wants.damage_to_self)
-            first.take_damage(second_wants.damage_to_other)
-            second.take_damage(second_wants.damage_to_self)
-            self.effects.hits.strike(Hit.between(
-                first, second,
-                first_takes=second_wants.damage_to_other + first_wants.damage_to_self,
-                second_takes=first_wants.damage_to_other + second_wants.damage_to_self,
-                speed=(first.effective_velocity - second.effective_velocity).length(),
-            ))
-            self.judge()
+        # 钩锁正拽着这一对、或者有人正穿刺：这一对不算碰撞。拖的时候不算，是
+        # 免得拖到身前那一瞬间先互撞一下白扣一次血；冲的时候不算，是"穿刺这一下
+        # 由穿刺自己结算"——伤害、停在哪，都在 update_thrusts 里定好了，碰撞
+        # 再来插一脚就是重复结算。位置正由别人摆着，所以连分离都不做
+        if self._is_pulled_pair(first, second) or first.thrust or second.thrust:
+            return False
 
-        # 自己人相撞**什么都不报**：不飘字、不炸圈、不顿帧。这个游戏里"震"的
-        # 含义是"挨了一下"（见 fx/impact.py），而这一下谁都没挨着。国王冲进自己
-        # 那群骑士里的时候，每蹭一下都顿一帧会难看得没法玩
+        same = self.same_side(first, second)
+        wants = None
+        if fresh:
+            # 同边一概不问主张（"自己人只撞不伤"，见 resolve_collisions）。
+            # 除非角色自己开口要——分裂那条"自己跟自己相撞就合体"本来就只有
+            # 同边才可能发生，不问就永远不会发生（Character.same_side_collisions）
+            if not same or first.character.same_side_collisions \
+                    or second.character.same_side_collisions:
+                wants = (
+                    first.character.on_collision(first, second),
+                    second.character.on_collision(second, first),
+                )
+
+        if wants is not None:
+            first_wants, second_wants = wants
+            # 撞击伤害只要撞上就结算。抓取只顶替"弹开"，不免除伤害——所以被抓住
+            # 的一方在被抓住的那一瞬间仍然打得出这一下。**同边不结算伤害**：
+            # 主张是问了（分裂要），但规矩没变
+            if not same:
+                #
+                # 每一方身上落**两笔**：对方主张打过来的那一笔，和自己主张里
+                # "自损"的那一笔（国王就是靠后者变成"撞上去是亏的"）。两笔都是
+                # 各自算好的数，这里只管往下砸
+                second.take_damage(first_wants.damage_to_other)
+                first.take_damage(first_wants.damage_to_self)
+                first.take_damage(second_wants.damage_to_other)
+                second.take_damage(second_wants.damage_to_self)
+                # 撞得有多快取**相对速度**：两球各自多快不重要，合起来撞得狠不狠
+                # 才重要，所以迎面对冲能撞出最大那一下。这一下也是全场唯一会顿帧
+                # 的命中。飘的数字是每一方这一撞总共掉了多少，两笔加在一起——
+                # 不然国王那一边只飘出"对方打来的 20"，血条却掉了 65
+                self.effects.hits.strike(Hit.between(
+                    first, second,
+                    first_takes=second_wants.damage_to_other
+                    + first_wants.damage_to_self,
+                    second_takes=first_wants.damage_to_other
+                    + second_wants.damage_to_self,
+                    speed=(first.effective_velocity - second.effective_velocity).length(),
+                ))
+
+            # 阵容先动，再判胜负：分裂和融合都发生在这一撞上，而且都会把伤害
+            # 结算留下来的那颗球换下去（融合是把两块并成一块，其中一块没了）
+            if first_wants.fuses or second_wants.fuses:
+                self.fuse_balls(first, second)
+                return True
+            if first_wants.splits or second_wants.splits:
+                self.split_pair(first, second, first_wants.splits, second_wants.splits)
+                return True
+
+            self.judge()
+            if self.finished:
+                # 有人被这一下打死了，弹开还是吸住都不必再谈
+                self.separate(first, second, normal, distance, minimum)
+                return False
+
+        # 抓取：不弹开，改成粘住持续吸取。排在霸体**前面**——霸体挡的是"被推动"，
+        # 不是"被碰上"：抓取本身照常发生，只是抓到手之后两边都动不了
+        # （见 combined_velocity：推不动的一方等效无穷大质量，合体速度由它说了算）。
+        # 同边不会走到这里：同边主张里那几个开关一概不作数（自己人抓自己人干什么）
+        if wants is not None and not same and (first_wants.grabs or second_wants.grabs):
+            grabber, victim, wanted = (
+                (first, second, first_wants) if first_wants.grabs
+                else (second, first, second_wants)
+            )
+            # 先摆到刚好相切，吸住期间就保持这个姿势。霸体的一方不让路，
+            # 所以这一步的位移全由抓人的一方走完
+            self.separate(first, second, normal, distance, minimum)
+            self.start_latch(grabber, victim, wanted.grab_seconds,
+                             wanted.grab_drain_per_second, silences=wanted.silences)
+            return False
+
+        # 霸体：定住的一方推不动，撞上来的一方原路弹回。
+        # 走到这里说明没人想抓（谁都抓的话上面那条就返回了），所以这是
+        # "普通撞击撞上霸体"的情形
+        if first.frozen or second.frozen:
+            self.reflect_off(first, second, normal, distance, minimum)
+            return False
+
+        # 走到这里说明双方都不抓。此时 silences 一概不生效——沉默没有时长，
+        # 必须有人负责解封，而"撞一下"这件事本身没有结束时刻，封了就没人解得开。
+        # 所以从碰撞来的沉默只跟抓取配着用（绑多久就封多久）。想只封不绑，
+        # 只能由技能来给：技能有生命周期，能在该结束的时候自己 unsilence。
+
+        # 等质量弹性碰撞：沿法线的速度分量互换。
+        # 先把两个速度取出来再写回，否则第二行算的是已经被改过的 first。
+        # **霸体的一方不参与换速度**：它的速度不由自己说了算，换了也白换
+        # （吸住的一对就是这样，两球本来就是一整团在飞）
         if not (self.has_super_armor(first) or self.has_super_armor(second)):
             first_velocity = first.effective_velocity
             second_velocity = second.effective_velocity
@@ -1702,7 +1805,118 @@ class Match:
             second.set_effective_velocity(
                 second_velocity - (second_velocity - first_velocity).dot(normal) * normal
             )
+
+        # 自己人相撞**什么都不报**：不飘字、不炸圈、不顿帧。这个游戏里"震"的
+        # 含义是"挨了一下"（见 fx/impact.py），而这一下谁都没挨着。国王冲进自己
+        # 那群骑士里的时候，每蹭一下都顿一帧会难看得没法玩
         self.separate(first, second, normal, distance, minimum)
+        return False
+
+    # ---------------- 分裂 ----------------
+    def split_pair(self, first: Ball, second: Ball,
+                   first_splits: bool, second_splits: bool) -> None:
+        """一边或两边同时裂开。
+
+        两边一起裂是可能的（两个分裂撞上了），各裂各的：朝**远离对方**的方向
+        散开是用户定的，所以两边散的方向正好相反。
+
+        方向在两边都还是原样的时候**一次算好**：先裂 first 会把它的位置挪走，
+        再拿它去算 second 往哪儿散，第二颗散的就是照着半身的落点算出来的方向。
+        """
+        offset = second.position - first.position
+        if offset.length_squared() > 1e-12:
+            first_away = -offset.normalize()
+        else:
+            # 正好重合，方向无从谈起，退回自己的朝向
+            first_away = Vector2(first.heading)
+        if first_splits:
+            self.split_ball(first, first_away, first.character.split_speed)
+        if second_splits:
+            self.split_ball(second, -first_away, second.character.split_speed)
+
+    def split_ball(self, ball: Ball, away: Vector2, speed: float) -> Ball:
+        """把球裂成两半：手上这颗留下当其中一半，另造一颗新的当另一半。
+
+        为什么**留下原来那一颗**而不是两颗都新造：球是实体，场上指向它的地方
+        认的是对象本身（血条挑的代表、钩锁的目标、"这一对里有没有它"）。让
+        原来那颗接着当"这一边的那块球"，只把它的尺寸、上限、代数改小，最省事
+        也最不容易漏一处引用。
+
+        两半各自**减半**血量和大小（用户定的），于是总量一个数都没少——一块
+        500 血的裂成两块 250 的，玩家那边的总血量原样。代价藏在别处：每一块
+        都比原来小、比原来脆，撞人时的质量口径（半径的平方）掉到四分之一。
+
+        散开的方向由调用方给（用户定的"朝远离来袭者的方向散开"），这里只负责
+        把它掰成左右两叉，两个半身各自沿着自己那一叉飞出去。
+        """
+        ball.generation += 1
+        ball.hp *= 0.5
+        ball.size = ball.character.radius * 0.5 ** ball.generation
+        ball.max_hp = ball.character.max_hp * 0.5 ** ball.generation
+
+        twin = Ball.spawn(
+            ball.player, ball.character, Vector2(ball.position),
+            velocity=Vector2(ball.velocity),
+            hp=ball.hp, size=ball.size, max_hp=ball.max_hp,
+            generation=ball.generation,
+        )
+        # 加速和冷却跟着走：半身是同一颗球劈出来的，两份"攒下来的本钱"当然
+        # 一人一半地接着算，而不是让新的那一块从零开始（spawn_speed 尤其要抄，
+        # 它是加速的标尺，两份不一样的话两块半身会越差越远）
+        twin.spawn_speed = ball.spawn_speed
+        twin.boost_stacks = ball.boost_stacks
+        twin.boost_bonus = ball.boost_bonus
+        twin.cooldown_timer = ball.cooldown_timer
+
+        origin = Vector2(ball.position)
+        # 摆开的距离按**新的半径**算：两个半身要摆到互不相切之外，还得离来袭者
+        # 足够远——碰撞结算就发生在这一帧，摆得太近的话下一帧它们各自又贴着敌人
+        # 一次，一发撞击能连打出三笔伤害
+        spread = SPLIT_SPREAD_ANGLE
+        step = ball.size * 2.0 + SPLIT_SPAWN_GAP
+        for sign, target in ((1.0, ball), (-1.0, twin)):
+            direction = away.rotate_rad(sign * spread)
+            target.position.update(origin + direction * step)
+            target.set_effective_velocity(direction * speed)
+            self.arena.clamp_inside(target.position, target.radius)
+            # 两半的融合锁：不锁的话下一帧它们就贴在相切的位置上（本来就这么摆的），
+            # 当场融回原样，分裂等于没发生过
+            target.fuse_lock = FUSE_LOCK_SECONDS
+
+        ball.character.attach_passives(twin, self)
+        self.units.append(twin)
+        # 刚劈出来的两块：这一撞里它们和敌人有没有贴上都还没算过，所以名单里
+        # 不预先写"贴着"。下一帧从干净的状态重新判
+        return twin
+
+    def fuse_balls(self, first: Ball, second: Ball) -> None:
+        """自己撞自己：两块**同代**的半身合回一块，退一代。
+
+        "退一代"（用户定的）是这条机制的关键：gen2 + gen2 合出来的是 gen1，
+        尺寸血量都翻一倍，**而且又能再裂两次**。所以融合不是白合——它是这个
+        角色唯一能把"裂散了"收回来、重新攒出一块大身板的手段。至于"分裂两次
+        的和分裂三次的碰撞没效果"，那一条不在这个函数里：能不能合是角色在
+        on_collision 里判的（代数不等就什么都不提），Match 只执行结果。
+
+        合出来的那一块继承 first 这个对象，second 从场上摘掉（同 split_ball
+        里"留下原来那一颗"的道理）。
+
+        血量**相加**、速度取动量守恒的合体速度：融合不凭空造出东西，只是把两份
+        并回一份。所以一块残血的半身和一块满血的半身合回来，得到的既不是满血
+        也不是残血，而是它们两个加起来那么多。
+        """
+        first.generation -= 1
+        first.size = first.character.radius * 0.5 ** first.generation
+        first.max_hp = first.character.max_hp * 0.5 ** first.generation
+        first.hp = min(first.max_hp, first.hp + second.hp)
+        first.position.update((first.position + second.position) / 2)
+        # 动量守恒：按半径平方加权，和吸住的合体速度是同一套算法
+        first.set_effective_velocity(self.combined_velocity(first, second))
+
+        self.units = [ball for ball in self.units if ball is not second]
+        # 合出来的这一块也上锁：旁边可能还站着一块同代的（另一对拆出来的），
+        # 不锁的话下一帧"啪"地又合一次，一代一瞬间退到底，四块碎片眨眼并成一块
+        first.fuse_lock = FUSE_LOCK_SECONDS
 
     # ---------------- 吸住 ----------------
     def start_latch(self, grabber: Ball, victim: Ball, seconds: float,
@@ -1826,8 +2040,8 @@ class Match:
             victim.unsilence()
 
         self.latch = None
-        # 松口时两球仍是相切的，复位接触标记；否则下一次真正撞上会被当成"还贴着"而漏掉
-        self.touching = False
+        # 松口时两球仍是相切的，清掉接触标记；否则下一次真正撞上会被当成"还贴着"而漏掉
+        self.forget_contact(grabber, victim)
 
     def latch_pair(self) -> tuple[Ball, Ball] | None:
         """当前粘在一起的两球（没吸住则为 None），供调试视图画连线用。"""
@@ -1858,21 +2072,30 @@ class Match:
         if not gone:
             return
         self.units = [unit for unit in self.units if unit.uid not in gone]
-        self.summon_contacts = {
-            pair for pair in self.summon_contacts
+        self.contacts = {
+            pair for pair in self.contacts
             if pair[0] not in gone and pair[1] not in gone
         }
 
     # ---------------- 胜负 ----------------
     def judge(self) -> None:
-        # 先收尸再判胜负：骑士死光不等于谁输了，这一句和下面的 survivors 没有
-        # 关系（survivors 数的是主球）。放在这里只是因为它是"伤害结算完"的
-        # 必经之路，见 retire_summons
+        """胜负：**全灭算输**。
+
+        原来数的是"两颗主球还剩几颗活着"——一个玩家就一颗球，所以"活着的不齐"
+        就等于"有人没了"。分裂一来，一个玩家在场上是**好几块**（最多八块），
+        "哪一块死了"不再是"这个人死了"，所以判的是**哪一边一块都不剩了**
+        （用户定的，顺带也定了"算总血量"，那个数在 side_hp 里）。
+        """
+        # 先收尸再判胜负：骑士死光不等于谁输了，这一句和下面的判定没有关系。
+        # 放在这里只是因为它是"伤害结算完"的必经之路，见 retire_summons
         self.retire_summons()
-        standing = [ball for ball in self.mains() if ball.alive]
-        if len(standing) == len(self.mains()):
+        # 死掉的块**不从 mains 里摘**（它们还躺在地上当尸体、界面也可能还在画），
+        # 所以"有哪些玩家"是稳定的，掉的是"哪些玩家还有活口"
+        sides = {ball.player for ball in self.mains()}
+        alive_sides = {ball.player for ball in self.mains() if ball.alive}
+        if alive_sides == sides:
             return
         self.finished = True
-        # 同时归零则平局。赢家报的是**玩家序号**——胜负是玩家之间的事，
+        # 同时全灭则平局。赢家报的是**玩家序号**——胜负是玩家之间的事，
         # 界面等着这个数去点亮哪一边
-        self.winner = standing[0].player if len(standing) == 1 else None
+        self.winner = next(iter(alive_sides)) if len(alive_sides) == 1 else None

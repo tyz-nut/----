@@ -124,6 +124,23 @@ class Ball:
     position: Vector2
     velocity: Vector2             # 基础速度（不含任何加成）
     hp: float
+    # 自身半径与血量上限。**本该照抄角色**，分裂出来的半身却是一次比一次小，
+    # 所以两样都得烤在球自己身上（值在创建的那一刻定下来，同 Fish / GoStone /
+    # WebAnchor：之后再改角色参数不会回头改已经生出来的这一块）。
+    # 0 表示"照抄角色"，由 __post_init__ 填上。
+    #
+    # 于是"这个角色有多少血"和"这一块有多少血"是两件事：角色的 max_hp 是**一个
+    # 玩家的总量**（分裂和融合都不改这个总量，见 Match.split_ball / fuse_balls），
+    # 球上这个只是它自己那一份。血条画的是总量，问的是 Match.side_hp
+    size: float = 0.0
+    max_hp: float = 0.0
+    # 这是第几代半身。0 = 没分裂过的本体，1 = 裂过一次。它同时决定三件事：
+    # 尺寸血量的折扣（除以 2 的它次方）、还能不能再裂、以及**能不能和对面那块
+    # 融合**——"分裂两次的和分裂三次的碰撞没效果"（用户定的）判的就是这个数不相等
+    generation: int = 0
+    # 刚分开的两个半身在这几秒里合不回去。少了它，分裂的那一帧两半就贴在相切
+    # 的位置上，下一帧当场融回原样，分裂等于没发生过（见 Match.fuse_balls）
+    fuse_lock: float = 0.0
     # 这颗球的**唯一编号**，出生时自动领一个。和 player 是两码事：player 说的是
     # "站哪一边"（国王和它的骑士是同一个 player），uid 说的是"是不是同一颗球"。
     #
@@ -209,28 +226,60 @@ class Ball:
         speed = self.velocity.length()
         if speed > 1e-9:
             self.heading = self.velocity / speed
+        # 没点名尺寸和上限的就是本体，照抄角色
+        if self.size <= 0.0:
+            self.size = float(self.character.radius)
+        if self.max_hp <= 0.0:
+            self.max_hp = self.character.max_hp
 
     @classmethod
     def spawn(cls, player: int, character: Character, position: Vector2,
               velocity: Vector2 | None = None,
-              summoned: bool = False) -> "Ball":
+              summoned: bool = False, hp: float | None = None,
+              size: float = 0.0, max_hp: float = 0.0,
+              generation: int = 0) -> "Ball":
         """满血、无冷却地生成一个球。
 
         summoned 只有召唤物（骑士）才填 True，见 Ball.summoned。
+
+        后面那几项是给分裂用的（见 Match.split_ball / fuse_balls）：半身不是
+        满血出生的，尺寸和上限也不是角色那一份，所以要能当场指定。不填就是
+        本体——满血、照抄角色、第 0 代。
         """
         return cls(
             player=player,
             character=character,
             position=position,
             velocity=random_velocity() if velocity is None else velocity,
-            hp=character.max_hp,
+            hp=character.max_hp if hp is None else hp,
+            size=size,
+            max_hp=max_hp,
+            generation=generation,
             summoned=summoned,
         )
 
     # ---------------- 只读属性 ----------------
     @property
-    def radius(self) -> int:
-        return self.character.radius
+    def radius(self) -> float:
+        """自身半径。本体等于 character.radius，半身是它的一半的一半……
+
+        是个**浮点**：三次减半之后 22 会变成 2.75，取整会在第二次就抹掉一截，
+        而"大小减半"是用户定死的规则，不该被像素取整偷偷改掉。
+        """
+        return self.size
+
+    @property
+    def draw_radius(self) -> int:
+        """画出来的半径。**物理用 radius（浮点），画用这个（整数）**。
+
+        pygame 的画圆只吃 int，而分裂出来的半身半径是 22/8 = 2.75 这样的数。
+        取整是**绘制那一层**的事，不该倒回去把物理量也改成整数——那样减半的
+        精度会被一路吃掉（22 裂三次本该是 2.75，取整就剩 2）。
+
+        另外它保底 1 像素：裂到第三代再乘个光环、残影之类的圈，半径可能不足
+        一个像素，画圆会直接抛异常。
+        """
+        return max(1, round(self.radius))
 
     @property
     def color(self) -> tuple[int, int, int]:
@@ -283,18 +332,25 @@ class Ball:
 
     @property
     def hp_ratio(self) -> float:
-        """血量百分比，0~1。血条、按百分比换血都用它。
+        """**这一块**的血量百分比，0~1。
 
-        用百分比而不是绝对值，是因为两个角色的 max_hp 不保证一样大：直接对调
+        按百分比而不是绝对值，是因为两个角色的 max_hp 不保证一样大：直接对调
         数值会让拿到的那份超过上限（血条爆表），或者换过来反而比原来少。
+
+        分裂的半身要的是自己的那一份（半血的一半就是满的），**玩家整体**的
+        百分比问的是 Match.side_hp_ratio —— 那一个才是血条上该画的东西。
         """
-        maximum = self.character.max_hp
+        maximum = self.max_hp
         return self.hp / maximum if maximum > 0 else 0.0
 
     @property
     def missing_hp(self) -> float:
-        """已损血量。死灵法师的撞击伤害按这个算——打得越狠越疼。"""
-        return max(0.0, self.character.max_hp - self.hp)
+        """已损血量。死灵法师的撞击伤害按这个算——打得越狠越疼。
+
+        量的是**这一块自己**的缺口：半身的缺口也只有一半大，所以它挨打时
+        死灵法师那份"按缺口算"的伤害也跟着小，方向是对的。
+        """
+        return max(0.0, self.max_hp - self.hp)
 
     @property
     def frozen(self) -> bool:
@@ -362,6 +418,8 @@ class Ball:
 
         沉默不在这里，因为它**没有时长**：解不解封是施加方的事，见 Ball.silence。
         """
+        if self.fuse_lock > 0.0:
+            self.fuse_lock = max(0.0, self.fuse_lock - dt)
         if self.cooldown_timer > 0:
             self.cooldown_timer = max(0.0, self.cooldown_timer - dt)
         if self.skill_active_remaining > 0:
@@ -772,7 +830,7 @@ class Ball:
         if stacks <= 0:
             return
         center = self.center_at(offset)
-        radius = self.radius + VENOM_STACK_RING_PADDING
+        radius = self.draw_radius + VENOM_STACK_RING_PADDING
         width = max(2, min(stacks, VENOM_STACK_RING_MAX))
         pygame.draw.circle(surface, COLOR_VENOM_RING, center, radius, width)
 
@@ -790,24 +848,26 @@ class Ball:
             return
         center = self.center_at(offset)
         pygame.draw.circle(
-            surface, COLOR_SLOW_RING, center, self.radius + SLOW_RING_PADDING, 2
+            surface, COLOR_SLOW_RING, center,
+            self.draw_radius + SLOW_RING_PADDING, 2
         )
 
     def draw(self, surface: pygame.Surface, offset: Vector2) -> None:
         center = self.center_at(offset)
-        pygame.draw.circle(surface, self.color, center, self.radius)
+        pygame.draw.circle(surface, self.color, center, self.draw_radius)
         # 内圈高光，让球体看起来更有体积感；加速时换成亮白，一眼能看出谁在加速
         highlight = (255, 255, 255) if self.boosted else tuple(
             min(255, c + 60) for c in self.color
         )
         pygame.draw.circle(
-            surface, highlight, center, self.radius, width=max(2, self.radius // 6)
+            surface, highlight, center, self.draw_radius,
+            width=max(2, self.draw_radius // 6)
         )
 
     def draw_debug(self, surface: pygame.Surface, font: pygame.font.Font,
                    vector_scale: float, offset: Vector2) -> None:
         """画出碰撞箱与当前动量。"""
-        radius = self.radius
+        radius = self.draw_radius
         center = self.center_at(offset)
 
         # 碰撞箱：圆的外接正方形

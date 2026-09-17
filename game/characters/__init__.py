@@ -36,6 +36,7 @@ from .skills import (
     WebSkill,
 )
 from .spider import Spider
+from .splitter import Splitter
 from .vampire import Vampire
 from .venom import VenomSting
 
@@ -71,4 +72,5 @@ __all__ = [
     "Lookout",
     "King",
     "Knight",
+    "Splitter",
 ]

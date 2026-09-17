@@ -34,9 +34,14 @@ class CollisionOutcome:
       一团一起飞 + 持续吸取），但 damage_to_other 照常结算——抓取只顶替弹开，
       不免除伤害。
     - silences：封住对方的技能。
+    - splits：**这一撞把自己裂成两半**（分裂）。
+    - fuses：**这一撞和对面那块合回一块**（分裂的半身撞上自己那一半）。
 
     抓取和沉默互不依赖：可以只抓不封，也可以只封不抓（以后一个"禁魔"技能
     大概就是后者）。吸血鬼当前两个都用了。
+
+    splits / fuses 和上面那些也互不依赖：分裂撞上敌人时是"伤对方一笔 **并且**
+    自己裂开"，融合那一下则什么都不伤（自己人）。
     """
 
     damage_to_other: float = 0.0
@@ -44,6 +49,8 @@ class CollisionOutcome:
     grab_seconds: float = 0.0            # > 0 表示吸住对方这么久
     grab_drain_per_second: float = 0.0   # 吸住期间每秒吸取对方多少血
     silences: bool = False               # 是否封住对方的技能
+    splits: bool = False                 # 这一撞把自己裂成两个半身
+    fuses: bool = False                  # 这一撞和对面那块合回一块
 
     @property
     def grabs(self) -> bool:
@@ -65,6 +72,16 @@ class Character:
     description: str          # 角色卡上的第二行小字
     skill: Skill
     passive: Skill | None = None   # 常驻被动，不占技能条。没有就是 None
+    # 同边相撞要不要照常问 on_collision。
+    #
+    # 默认不——"自己人只撞不伤"是全场通用的规矩，由 Match 直接挡在问之前
+    # （国王和它的骑士、骑士和骑士，撞上照常弹开，但一概不问主张，见
+    # Match.resolve_collisions）。分裂是唯一的例外：它的"自己跟自己相撞就
+    # 合体"本来就是同边之间的事，不问就永远不会发生。
+    #
+    # 开了这一栏的角色，同边相撞时 on_collision 照常被问，但**伤害一律不结算**
+    # ——规矩没变，只是多问了一句。
+    same_side_collisions: bool = False
 
     def attach_passives(self, ball: Ball, match) -> None:
         """造球的时候把生来就有的东西挂上去。两栏都问一遍，没有的什么都不做。
